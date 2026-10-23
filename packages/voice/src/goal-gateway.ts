@@ -113,10 +113,10 @@ export function createGoalGateway(options: GoalGatewayOptions): { server: Server
       }> => event.goalId === goalId
         && ['action.completed', 'action.cancelled', 'action.failed'].includes(event.type));
       if (terminal) {
-        respond(response, 200, formatActionOutcome(kind as Goal['kind'], terminal));
+        respond(response, 200, { ...formatActionOutcome(kind as Goal['kind'], terminal), objective: scheduler.objective ?? null });
       } else {
         const started = events.some((event) => event.goalId === goalId && event.type === 'action.started');
-        respond(response, 202, formatPendingOutcome(kind, started));
+        respond(response, 202, { ...formatPendingOutcome(kind, started), objective: scheduler.objective ?? null });
       }
       return;
     }
@@ -134,6 +134,7 @@ export function createGoalGateway(options: GoalGatewayOptions): { server: Server
         const result = await scheduler.stop(`voice-stop-${randomUUID()}`);
         respond(response, result.status === 'completed' ? 200 : 503, {
           status: result.status,
+          objective: scheduler.objective ?? null,
           ...(result.detail ? { error: result.detail } : {}),
         });
         return;
@@ -143,8 +144,15 @@ export function createGoalGateway(options: GoalGatewayOptions): { server: Server
         return;
       }
       const body = await readJson(request);
-      if (Object.keys(body).some((key) => !['kind', 'args'].includes(key))) {
-        throw new TypeError('Only kind and args are accepted');
+      if (Object.keys(body).some((key) => !['kind', 'args', 'objective'].includes(key))) {
+        throw new TypeError('Only kind, args, and objective are accepted');
+      }
+      let objective: string | undefined;
+      if (body.objective !== undefined) {
+        if (typeof body.objective !== 'string' || body.objective.trim().length === 0 || body.objective.trim().length > 240) {
+          throw new TypeError('Objective must be a non-empty string of at most 240 characters');
+        }
+        objective = body.objective.trim();
       }
       if (typeof body.kind !== 'string' || !(allowedKinds as readonly string[]).includes(body.kind)) {
         throw new TypeError('Goal kind is not supported');
@@ -157,9 +165,10 @@ export function createGoalGateway(options: GoalGatewayOptions): { server: Server
         args: body.args ?? {},
         source: 'voice',
       });
+      if (objective) scheduler.setObjective(objective);
       goalKinds.set(goal.id, goal.kind);
       await scheduler.submit(goal);
-      respond(response, 202, { goalId: goal.id, status: 'accepted' });
+      respond(response, 202, { goalId: goal.id, status: 'accepted', objective: scheduler.objective ?? null });
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
       respond(response, error instanceof TypeError || error instanceof SyntaxError || error instanceof RangeError ? 400 : 500, { error: message });

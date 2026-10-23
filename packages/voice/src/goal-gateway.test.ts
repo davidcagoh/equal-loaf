@@ -16,10 +16,13 @@ test('accepts only safe typed goals and schedules them through the injected exec
   try {
     const accepted = await fetch(`${base}/goals`, {
       method: 'POST', headers: { 'content-type': 'application/json' },
-      body: JSON.stringify({ kind: 'follow', args: { target: 'player' } }),
+      body: JSON.stringify({ kind: 'follow', args: { target: 'player' }, objective: 'Build a small oak house' }),
     });
     assert.equal(accepted.status, 202);
-    assert.equal((await accepted.json()).status, 'accepted');
+    const acceptedBody = await accepted.json();
+    assert.match(acceptedBody.goalId, /^voice-/);
+    assert.equal(acceptedBody.status, 'accepted');
+    assert.equal(acceptedBody.objective, 'Build a small oak house');
     await gateway.scheduler.drain();
     assert.equal(executed[0]?.kind, 'follow');
     assert.equal(executed[0]?.source, 'voice');
@@ -37,6 +40,13 @@ test('accepts only safe typed goals and schedules them through the injected exec
       body: JSON.stringify({ kind: 'follow', args: { shell: 'dangerous' } }),
     });
     assert.equal(rejected.status, 400);
+    assert.equal(executed.length, 1);
+
+    const invalidObjective = await fetch(`${base}/goals`, {
+      method: 'POST', headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ kind: 'follow', args: {}, objective: '   ' }),
+    });
+    assert.equal(invalidObjective.status, 400);
     assert.equal(executed.length, 1);
 
     const stopped = await fetch(`${base}/stop`, {
@@ -116,7 +126,7 @@ test('exposes readiness, active goals, and timestamped lifecycle events for the 
 
     const accepted = await fetch(`${base}/goals`, {
       method: 'POST', headers: { 'content-type': 'application/json' },
-      body: JSON.stringify({ kind: 'follow', args: { target: 'player' } }),
+      body: JSON.stringify({ kind: 'follow', args: { target: 'player' }, objective: 'Build a small oak house' }),
     });
     assert.equal(accepted.status, 202);
     const acceptedBody = await accepted.json();
@@ -141,6 +151,7 @@ test('exposes readiness, active goals, and timestamped lifecycle events for the 
 
     const active = await fetch(`${base}/status`).then((response) => response.json());
     assert.equal(active.currentGoal.kind, 'follow');
+    assert.equal(active.objective, 'Build a small oak house');
     const started = active.events.find((event: { goalId: string; type: string }) => event.goalId === goalId && event.type === 'action.started');
     assert.ok(started);
     assert.equal(typeof started.eventId, 'string');
@@ -158,6 +169,7 @@ test('exposes readiness, active goals, and timestamped lifecycle events for the 
     assert.equal(outcome.status, 200);
     const outcomeBody = await outcome.json();
     assert.equal(outcomeBody.status, 'completed');
+    assert.equal(outcomeBody.objective, 'Build a small oak house');
     assert.match(outcomeBody.message, /Reached player/);
     const missing = await fetch(`${base}/results/not-known?kind=follow`);
     assert.equal(missing.status, 404);
