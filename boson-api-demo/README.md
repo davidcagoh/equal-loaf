@@ -25,7 +25,7 @@ The broader workflow is **approved transcript → voice → timing/alignment →
   bash scripts/start-companion-demo.sh
   ```
 
-- Open `http://127.0.0.1:8000`. The browser connects to Boson for Realtime and requests microphone access. Server VAD threshold defaults to 0.70 and can be tuned in the UI (the provider default is now 0.85). TTS and Avatar buttons submit paid API requests. Local request limits are 10 TTS and 3 Avatar requests per hour; Realtime ephemeral-key requests are not locally rate-limited. Boson-side limits still apply. Realtime auto-disconnects after five minutes.
+- Open `http://127.0.0.1:8000`. The browser connects to Boson for Realtime and requests microphone access. Server VAD threshold defaults to the provider's updated 0.85 and can be tuned in the UI for quieter microphones. TTS and Avatar buttons submit paid API requests. Local request limits are 10 TTS and 3 Avatar requests per hour; Realtime ephemeral-key requests are not locally rate-limited. Boson-side limits still apply. Realtime auto-disconnects after five minutes.
 
 ## Cost and authorization
 
