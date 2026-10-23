@@ -6,6 +6,12 @@ import { parseGoalProposal, type CompanionEvent, type Goal, type GoalResult, typ
 
 const allowedKinds = ['follow', 'stop', 'approach', 'gather', 'give', 'defend', 'retreat', 'report'] as const;
 const objectiveKinds = new Set<Goal['kind']>(['follow', 'approach', 'gather', 'give']);
+const objectiveLabels = {
+  build_house: 'Build a house together',
+  gather_wood: 'Gather wood together',
+  explore: 'Explore together',
+  survive: 'Stay safe together',
+} as const;
 const maxBodyBytes = 16 * 1024;
 
 export interface GoalGatewayOptions {
@@ -150,10 +156,11 @@ export function createGoalGateway(options: GoalGatewayOptions): { server: Server
       }
       let objective: string | undefined;
       if (body.objective !== undefined) {
-        if (typeof body.objective !== 'string' || body.objective.trim().length === 0 || body.objective.trim().length > 240) {
-          throw new TypeError('Objective must be a non-empty string of at most 240 characters');
+        if (typeof body.objective !== 'string'
+          || !Object.hasOwn(objectiveLabels, body.objective)) {
+          throw new TypeError('Objective must be a supported shared-task category');
         }
-        objective = body.objective.trim();
+        objective = objectiveLabels[body.objective as keyof typeof objectiveLabels];
       }
       if (typeof body.kind !== 'string' || !(allowedKinds as readonly string[]).includes(body.kind)) {
         throw new TypeError('Goal kind is not supported');
@@ -166,9 +173,9 @@ export function createGoalGateway(options: GoalGatewayOptions): { server: Server
         args: body.args ?? {},
         source: 'voice',
       });
-      if (objective && objectiveKinds.has(kind)) scheduler.setObjective(objective);
       goalKinds.set(goal.id, goal.kind);
       await scheduler.submit(goal);
+      if (objective && objectiveKinds.has(kind)) scheduler.setObjective(objective);
       respond(response, 202, { goalId: goal.id, status: 'accepted', objective: scheduler.objective ?? null });
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
