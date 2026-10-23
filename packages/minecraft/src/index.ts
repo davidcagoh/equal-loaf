@@ -1,9 +1,11 @@
 import { EventEmitter } from 'node:events';
 import type { GameAdapter, Goal, GoalKind, GoalResult, Observation } from '../../contracts/src/index.ts';
 
-interface Vec3 { x: number; y: number; z: number }
-interface EntityLike { position: Vec3; health?: number; username?: string; type?: string }
+interface Vec3 { x: number; y: number; z: number; offset?(x: number, y: number, z: number): Vec3 }
+interface EntityLike { position: Vec3; health?: number; username?: string; type?: string; name?: string; kind?: string; isValid?: boolean; metadata?: unknown[] }
 interface PlayerLike { entity?: EntityLike }
+interface BlockLike { name: string; position: Vec3; boundingBox: 'block' | 'empty' | 'complex' }
+interface InventoryItemLike { name: string; count: number; type?: number }
 interface PathfinderLike {
   setMovements(movements: unknown): void;
   setGoal(goal: unknown | null, dynamic?: boolean): void;
@@ -14,7 +16,15 @@ export interface MineflayerBot extends EventEmitter {
   username: string;
   entity?: EntityLike;
   players: Record<string, PlayerLike>;
-  inventory: { items(): Array<{ name: string; count: number }> };
+  entities: Record<string, EntityLike>;
+  inventory: { items(): InventoryItemLike[] };
+  registry: { itemsByName: Record<string, { id: number } | undefined> };
+  findBlocks(options: { matching: (block: BlockLike) => boolean; maxDistance: number; count: number }): Vec3[];
+  blockAt(point: Vec3): BlockLike | null;
+  canDigBlock(block: BlockLike): boolean;
+  dig(block: BlockLike, forceLook?: boolean): Promise<void>;
+  stopDigging(): void;
+  toss(itemType: number, metadata: number | null, count: number | null): Promise<void>;
   pathfinder: PathfinderLike;
   loadPlugin(plugin: unknown): void;
   clearControlStates(): void;
@@ -41,7 +51,7 @@ export interface MinecraftAdapterOptions {
   connectTimeoutMs?: number;
 }
 
-const supportedKinds: readonly GoalKind[] = ['follow', 'stop', 'approach', 'retreat', 'report'];
+const supportedKinds: readonly GoalKind[] = ['follow', 'stop', 'approach', 'gather', 'give', 'defend', 'retreat', 'report'];
 const loopbackHosts = new Set(['127.0.0.1', 'localhost', '::1']);
 
 function position(entity: EntityLike | undefined): Vec3 | undefined {
@@ -158,7 +168,19 @@ export class MinecraftAdapter implements GameAdapter {
     if (!agentPosition) throw new Error('Minecraft bot position is not available.');
     const playerEntity = bot.players[this.playerName]?.entity;
     const playerPosition = position(playerEntity);
-    const inventory = Object.fromEntries(bot.inventory.items().map((item) => [item.name, item.count]));
+    const inventory = bot.inventory.items().reduce<Record<string, number>>((counts, item) => {
+      counts[item.name] = (counts[item.name] ?? 0) + item.count;
+      return counts;
+    }, {});
+    const threats = Object.values(bot.entities)
+      .filter((entity) => entity.kind === 'Hostile mobs' && entity.isValid !== false)
+      .flatMap((entity) => {
+        const threatPosition = position(entity);
+        if (!threatPosition) return [];
+        const distance = Math.hypot(threatPosition.x - agentPosition.x, threatPosition.y - agentPosition.y, threatPosition.z - agentPosition.z);
+        return distance <= 16 ? [`${entity.name ?? 'hostile mob'} (${Math.round(distance)} blocks)`] : [];
+      })
+      .slice(0, 5);
     return {
       timestamp: Date.now(),
       game: 'minecraft',
@@ -168,6 +190,7 @@ export class MinecraftAdapter implements GameAdapter {
         ...(typeof bot.entity?.health === 'number' ? { health: bot.entity.health } : {}),
       },
       inventory,
+      threats,
     };
   }
 
@@ -183,10 +206,25 @@ export class MinecraftAdapter implements GameAdapter {
       const observation = await this.observe();
       const playerState = observation.player ? `Player ${this.playerName} is nearby.` : `I cannot see ${this.playerName}.`;
       const health = observation.agent?.health === undefined ? '' : ` Bot health is ${observation.agent.health}.`;
-      return { status: 'completed', detail: `${playerState}${health}` };
+      const inventory = Object.entries(observation.inventory ?? {}).sort(([left], [right]) => left.localeCompare(right))
+        .map(([name, count]) => `${count} ${name}`).join(', ') || 'empty';
+      const threats = (observation.threats ?? []).filter((threat): threat is string => typeof threat === 'string');
+      const threatSummary = threats.length ? ` Nearby hostile mobs: ${threats.join(', ')}.` : ' No nearby hostile mobs detected.';
+      return { status: 'completed', detail: `${playerState}${health} Inventory: ${inventory}.${threatSummary}` };
+    }
+    if (goal.kind === 'gather') return this.gather(bot, goal.args, signal);
+    if (goal.kind === 'give') return this.give(bot, goal.args, signal);
+    if (goal.kind === 'defend') {
+      const spawn = this.retreatTarget(bot);
+      if (!spawn) return { status: 'failed', detail: 'Safe spawn position is not available.' };
+      return this.goto(bot, spawn, 1, 'Combat is unavailable; returned to the prepared spawn point.', signal);
     }
     if (goal.kind === 'follow' || goal.kind === 'approach') {
-      const targetName = typeof goal.args.target === 'string' ? goal.args.target : this.playerName;
+      const requestedTarget = typeof goal.args.target === 'string' ? goal.args.target.trim() : '';
+      const targetAlias = requestedTarget.toLowerCase();
+      const targetName = !requestedTarget || ['me', 'myself', 'you', 'player', 'the player'].includes(targetAlias)
+        ? this.playerName
+        : requestedTarget;
       if (targetName !== this.playerName) return { status: 'failed', detail: `Only configured player ${this.playerName} can be followed.` };
       const target = bot.players[targetName]?.entity;
       if (!target) return { status: 'failed', detail: `Player ${targetName} is not visible in the Minecraft world.` };
@@ -194,7 +232,7 @@ export class MinecraftAdapter implements GameAdapter {
         ? this.follow(bot, target, targetName, signal)
         : this.goto(bot, target.position, this.followRange, `Approached ${targetName}.`, signal);
     }
-    const spawn = this.safeSpawn;
+    const spawn = this.retreatTarget(bot);
     if (!spawn) return { status: 'failed', detail: 'Safe spawn position is not available.' };
     return this.goto(bot, spawn, 1, 'Returned to the prepared spawn point.', signal);
   }
@@ -217,6 +255,152 @@ export class MinecraftAdapter implements GameAdapter {
   private stopNavigation(bot: MineflayerBot): void {
     bot.pathfinder.setGoal(null);
     bot.clearControlStates();
+  }
+
+  private async gather(bot: MineflayerBot, args: Record<string, unknown>, signal: AbortSignal): Promise<GoalResult> {
+    const requestedItem = typeof args.item === 'string' ? args.item.trim().toLowerCase() : 'wood';
+    if (!['wood', 'log', 'logs', 'tree', 'oak_log'].includes(requestedItem)) {
+      return { status: 'failed', detail: 'Gather supports logs from reachable trees only.' };
+    }
+    const quantity = Number(args.quantity ?? 1);
+    if (!Number.isInteger(quantity) || quantity < 1 || quantity > 16) {
+      return { status: 'failed', detail: 'Gather quantity must be between 1 and 16 logs.' };
+    }
+    let collected = 0;
+    const collectedKinds = new Map<string, number>();
+    const logCounts = () => bot.inventory.items()
+      .filter((item) => item.name.endsWith('_log'))
+      .reduce((total, item) => total + item.count, 0);
+
+    while (collected < quantity) {
+      if (signal.aborted) return { status: 'cancelled', detail: String(signal.reason ?? 'Cancelled by scheduler') };
+      const logPosition = bot.findBlocks({
+        matching: (block) => block.name.endsWith('_log'),
+        maxDistance: 32,
+        count: 16,
+      })[0];
+      if (!logPosition) {
+        const detail = collected === 0 ? 'No reachable tree logs were found nearby.' : `Collected ${collected} of ${quantity} requested logs; no more reachable tree logs were found.`;
+        return { status: 'failed', detail };
+      }
+      const route = await this.goto(bot, logPosition, 2, 'Reached a tree log.', signal);
+      if (route.status !== 'completed') return route;
+      if (signal.aborted) return { status: 'cancelled', detail: String(signal.reason ?? 'Cancelled by scheduler') };
+      const block = bot.blockAt(logPosition);
+      if (!block || !block.name.endsWith('_log') || !bot.canDigBlock(block)) {
+        return { status: 'failed', detail: 'The nearby tree log is no longer safe or available to dig.' };
+      }
+      const before = logCounts();
+      let droppedItem: EntityLike | undefined;
+      const expectedItemId = bot.registry.itemsByName[block.name]?.id;
+      const onItemDrop = (entity: EntityLike) => {
+        if (entity.name !== 'item' || expectedItemId === undefined || !hasItemId(entity.metadata, expectedItemId)) return;
+        const dropPosition = position(entity);
+        if (!dropPosition) return;
+        const dx = dropPosition.x - block.position.x;
+        const dy = dropPosition.y - block.position.y;
+        const dz = dropPosition.z - block.position.z;
+        if (dx * dx + dy * dy + dz * dz <= 9) droppedItem = entity;
+      };
+      bot.on('itemDrop', onItemDrop);
+      const digResult = new Promise<boolean>((resolve, reject) => {
+        const onAbort = () => { bot.stopDigging(); resolve(true); };
+        signal.addEventListener('abort', onAbort, { once: true });
+        void bot.dig(block, true).then(
+          () => { signal.removeEventListener('abort', onAbort); resolve(false); },
+          (error: unknown) => { signal.removeEventListener('abort', onAbort); reject(error); },
+        );
+      });
+      let wasCancelled: boolean;
+      try {
+        wasCancelled = await digResult;
+      } catch (error) {
+        return { status: 'failed', detail: error instanceof Error ? error.message : 'Minecraft could not dig the tree log.' };
+      } finally {
+        bot.removeListener('itemDrop', onItemDrop);
+      }
+      if (wasCancelled) return { status: 'cancelled', detail: String(signal.reason ?? 'Cancelled by scheduler') };
+      if (signal.aborted) return { status: 'cancelled', detail: String(signal.reason ?? 'Cancelled by scheduler') };
+      if (logCounts() <= before && droppedItem) {
+        const pickup = await this.goto(bot, droppedItem.position, 0.5, 'Picked up a tree log.', signal);
+        if (pickup.status !== 'completed') return pickup;
+      }
+      const deadline = Date.now() + 2_000;
+      while (Date.now() < deadline && logCounts() <= before && !signal.aborted) {
+        await new Promise((resolve) => setTimeout(resolve, 100));
+      }
+      if (signal.aborted) return { status: 'cancelled', detail: String(signal.reason ?? 'Cancelled by scheduler') };
+      if (logCounts() <= before) return { status: 'failed', detail: 'Broke a tree log but could not confirm picking up the wood.' };
+      collected += 1;
+      collectedKinds.set(block.name, (collectedKinds.get(block.name) ?? 0) + 1);
+    }
+    const summary = [...collectedKinds].map(([name, count]) => `${count} ${name.replace(/_log$/, ' log')}${count === 1 ? '' : 's'}`).join(', ');
+    return { status: 'completed', detail: `Collected ${summary}.` };
+  }
+
+  private async give(bot: MineflayerBot, args: Record<string, unknown>, signal: AbortSignal): Promise<GoalResult> {
+    const itemName = typeof args.item === 'string' ? args.item.trim().toLowerCase() : '';
+    if (!itemName) return { status: 'failed', detail: 'Name the item to drop near the player.' };
+    const requestedQuantity = Number(args.quantity ?? 1);
+    if (!Number.isInteger(requestedQuantity) || requestedQuantity < 1) {
+      return { status: 'failed', detail: 'Item quantity must be a positive whole number.' };
+    }
+    const targetName = this.playerTarget(args.target);
+    if (!targetName) return { status: 'failed', detail: `Only configured player ${this.playerName} can receive items.` };
+    const item = bot.inventory.items().find((entry) => entry.name.toLowerCase() === itemName);
+    if (!item || item.type === undefined) return { status: 'failed', detail: `I do not have ${itemName} to drop.` };
+    const count = Math.min(requestedQuantity, item.count);
+    for (let attempt = 0; attempt < 3; attempt += 1) {
+      const target = bot.players[targetName]?.entity;
+      if (!target) return { status: 'failed', detail: `Player ${targetName} is not visible in the Minecraft world.` };
+      const route = await this.goto(bot, target.position, 2, `Reached ${targetName}.`, signal);
+      if (route.status !== 'completed') return route;
+      if (signal.aborted) return { status: 'cancelled', detail: String(signal.reason ?? 'Cancelled by scheduler') };
+      const currentTarget = position(bot.players[targetName]?.entity);
+      const botPosition = position(bot.entity);
+      if (!currentTarget || !botPosition) return { status: 'failed', detail: `Could not confirm ${targetName}'s current position.` };
+      if (Math.hypot(currentTarget.x - botPosition.x, currentTarget.y - botPosition.y, currentTarget.z - botPosition.z) > 2) continue;
+      try {
+        await bot.toss(item.type, null, count);
+        return { status: 'completed', detail: `Dropped ${count} ${itemName} near ${targetName}; they can pick it up.` };
+      } catch (error) {
+        return { status: 'failed', detail: error instanceof Error ? error.message : `Could not drop ${itemName}.` };
+      }
+    }
+    return { status: 'failed', detail: `${targetName} moved while I approached; I did not drop the item.` };
+  }
+
+  private playerTarget(target: unknown): string | undefined {
+    if (target === undefined) return this.playerName;
+    if (typeof target !== 'string') return undefined;
+    const requested = target.trim();
+    if (!requested || ['me', 'myself', 'you', 'player', 'the player'].includes(requested.toLowerCase())) return this.playerName;
+    return requested === this.playerName ? this.playerName : undefined;
+  }
+
+  private retreatTarget(bot: MineflayerBot): Vec3 | undefined {
+    const spawn = this.safeSpawn;
+    if (!spawn) return undefined;
+    const x = Math.floor(spawn.x);
+    const z = Math.floor(spawn.z);
+    const baseY = Math.floor(spawn.y);
+    const offsets = Array.from({ length: 33 }, (_, index) => index === 0 ? 0 : (index % 2 ? -(index + 1) / 2 : index / 2));
+    const unsafeGround = new Set(['lava', 'fire', 'soul_fire', 'magma_block', 'cactus', 'campfire', 'soul_campfire', 'powder_snow']);
+    const origin = bot.entity?.position;
+    if (!origin) return undefined;
+    const blockAt = (targetY: number) => bot.blockAt(origin.offset
+      ? origin.offset(x - origin.x, targetY - origin.y, z - origin.z)
+      : { x, y: targetY, z });
+    for (const offset of offsets) {
+      const y = baseY + offset;
+      const support = blockAt(y - 1);
+      const feet = blockAt(y);
+      const head = blockAt(y + 1);
+      if (support?.boundingBox === 'block' && !unsafeGround.has(support.name)
+        && feet?.boundingBox === 'empty' && !unsafeGround.has(feet.name)
+        && head?.boundingBox === 'empty' && !unsafeGround.has(head.name)) return { x, y, z };
+    }
+    return undefined;
   }
 
   private follow(bot: MineflayerBot, target: EntityLike, targetName: string, signal: AbortSignal): Promise<GoalResult> {
@@ -276,6 +460,14 @@ export class MinecraftAdapter implements GameAdapter {
       if (signal.aborted) onAbort();
     });
   }
+}
+
+function hasItemId(value: unknown, expectedId: number): boolean {
+  if (Array.isArray(value)) return value.some((entry) => hasItemId(entry, expectedId));
+  if (typeof value !== 'object' || value === null) return false;
+  const record = value as Record<string, unknown>;
+  if (record.itemId === expectedId) return true;
+  return Object.values(record).some((entry) => hasItemId(entry, expectedId));
 }
 
 /** Load the pinned runtime packages only in the live adapter process. */
