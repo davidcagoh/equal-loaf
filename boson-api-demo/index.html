@@ -1,0 +1,376 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Boson Dry Run</title>
+<style>
+  :root { --bg:#0f1115; --card:#181b22; --line:#2a2f3a; --fg:#e6e8ec; --mute:#8b93a3; --acc:#6ea8ff; --ok:#4cc38a; --bad:#ff6b6b; }
+  * { box-sizing:border-box; }
+  body { margin:0; background:var(--bg); color:var(--fg); font:15px/1.45 system-ui, sans-serif; }
+  main { max-width:900px; margin:0 auto; padding:24px 16px 60px; display:grid; gap:16px; }
+  h1 { margin:0; font-size:22px; } h2 { margin:0 0 10px; font-size:17px; }
+  .sub { color:var(--mute); margin:4px 0 0; }
+  section { background:var(--card); border:1px solid var(--line); border-radius:10px; padding:16px; }
+  textarea, select, input[type=file] { width:100%; background:#0b0d11; color:var(--fg); border:1px solid var(--line); border-radius:6px; padding:8px; font:inherit; }
+  textarea { min-height:64px; resize:vertical; }
+  .row { display:flex; gap:8px; flex-wrap:wrap; align-items:center; margin-top:8px; }
+  button { background:var(--acc); color:#08111f; border:0; border-radius:6px; padding:8px 14px; font-weight:600; cursor:pointer; }
+  button.ghost { background:transparent; color:var(--fg); border:1px solid var(--line); }
+  button:disabled { opacity:.45; cursor:default; }
+  .status { font-size:13px; color:var(--mute); }
+  .status.ok { color:var(--ok); } .status.bad { color:var(--bad); }
+  #log { height:220px; overflow:auto; background:#0b0d11; border:1px solid var(--line); border-radius:6px; padding:8px; font-size:13px; margin-top:8px; }
+  #log div { margin:2px 0; } .you { color:var(--acc); } .bot { color:var(--fg); } .tool { color:#e0b24f; } .sys { color:var(--mute); }
+  audio, video { width:100%; margin-top:8px; border-radius:6px; }
+  video { max-width:400px; background:#000; }
+</style>
+</head>
+<body>
+<main>
+  <header>
+    <h1>Boson API dry run</h1>
+    <p class="sub">One check each for Higgs TTS, Realtime (voice + tool calling) and Avatar. The API key stays on the local server.</p>
+  </header>
+
+  <section>
+    <h2>1. Higgs TTS</h2>
+    <textarea id="ttsText"><|emotion:enthusiasm|>Hey! If you can hear this, the text to speech API works.</textarea>
+    <div class="row">
+      <select id="ttsVoice" style="width:auto"></select>
+      <button id="ttsBtn">Speak</button>
+      <span id="ttsStatus" class="status"></span>
+    </div>
+    <audio id="ttsAudio" controls hidden></audio>
+  </section>
+
+  <section>
+    <h2>2. Higgs Realtime</h2>
+    <p class="sub">Sessions end automatically after 5 minutes. Spoken game goals go through the local typed scheduler; Minecraft actions remain unavailable until a game adapter is connected.</p>
+    <p id="rtReminder" class="sub">Press Start to connect the microphone and begin a short test.</p>
+    <div class="row">
+      <button id="rtStart">Start</button>
+      <button id="rtStop" class="ghost" disabled>Stop</button>
+      <span id="rtStatus" class="status">idle</span>
+    </div>
+    <div id="log"></div>
+  </section>
+
+  <section>
+    <h2>3. Higgs Avatar</h2>
+    <p class="sub">Generates a talking-head clip billed by duration and resolution. Check the current vendor price and account access before generating. Leave the image empty to use Boson's sample face.</p>
+    <textarea id="avText">Hi! I'm a talking avatar, and this is a quick test of the Higgs Avatar API.</textarea>
+    <div class="row">
+      <input id="avImage" type="file" accept="image/png,image/jpeg,image/webp" style="width:auto">
+      <select id="avVoice" style="width:auto"></select>
+      <button id="avUseLast" class="ghost">Use last Realtime reply</button>
+      <button id="avBtn">Generate video</button>
+      <span id="avStatus" class="status"></span>
+    </div>
+    <video id="avVideo" controls hidden></video>
+  </section>
+</main>
+
+<script>
+const LOCAL_API_TOKEN = "__LOCAL_API_TOKEN__";
+function localFetch(url, options = {}) {
+  const headers = new Headers(options.headers || {});
+  headers.set("Content-Type", "application/json");
+  headers.set("X-Local-Token", LOCAL_API_TOKEN);
+  return fetch(url, { ...options, headers });
+}
+const $ = id => document.getElementById(id);
+const VOICES = ["default", "chloe", "eleanor", "jake", "marcus", "nora", "oliver"];
+for (const sel of [$("ttsVoice"), $("avVoice")]) sel.innerHTML = VOICES.map(v => `<option>${v}</option>`).join("");
+
+function setStatus(el, text, kind = "") { el.textContent = text; el.className = "status " + kind; }
+async function errText(res) { const t = await res.text(); try { return JSON.parse(t).error?.message || t; } catch { return t; } }
+
+// ---------- 1. TTS ----------
+$("ttsBtn").onclick = async () => {
+  setStatus($("ttsStatus"), "generating…");
+  $("ttsBtn").disabled = true;
+  try {
+    const t0 = performance.now();
+    const res = await localFetch("/api/tts", { method: "POST", body: JSON.stringify({ text: $("ttsText").value, voice: $("ttsVoice").value }) });
+    if (!res.ok) throw new Error(`${res.status}: ${await errText(res)}`);
+    const audio = $("ttsAudio");
+    audio.src = URL.createObjectURL(await res.blob());
+    audio.hidden = false;
+    audio.play();
+    setStatus($("ttsStatus"), `OK in ${((performance.now() - t0) / 1000).toFixed(1)}s`, "ok");
+  } catch (e) { setStatus($("ttsStatus"), e.message, "bad"); }
+  $("ttsBtn").disabled = false;
+};
+
+// ---------- 2. Realtime ----------
+const RATE = 24000;
+const MAX_SESSION_MS = 5 * 60 * 1000;
+const SESSION_WARNING_MS = 30 * 1000;
+let ws, ctx, micStream, processor, playHead = 0, playing = [], lastReply = "", botLine = null;
+let responseInProgress = false;
+let outstandingGoal = false, speechStartedAt = null, firstAudioMeasured = false;
+let speechInterruptGeneration = 0, acceptedGoalGeneration = 0;
+let sessionEndsAt = 0, sessionTimer = null, countdownTimer = null;
+
+function log(cls, text) {
+  const d = document.createElement("div");
+  d.className = cls; d.textContent = text;
+  $("log").appendChild(d); $("log").scrollTop = 1e9;
+  return d;
+}
+
+function b64FromPcm(float32) {
+  const pcm = new Int16Array(float32.length);
+  for (let i = 0; i < float32.length; i++) pcm[i] = Math.max(-1, Math.min(1, float32[i])) * 0x7fff;
+  let s = ""; const bytes = new Uint8Array(pcm.buffer);
+  for (let i = 0; i < bytes.length; i += 0x8000) s += String.fromCharCode(...bytes.subarray(i, i + 0x8000));
+  return btoa(s);
+}
+
+function playPcm(b64) {
+  const bytes = Uint8Array.from(atob(b64), c => c.charCodeAt(0));
+  const pcm = new Int16Array(bytes.buffer);
+  const buf = ctx.createBuffer(1, pcm.length, RATE);
+  const ch = buf.getChannelData(0);
+  for (let i = 0; i < pcm.length; i++) ch[i] = pcm[i] / 0x8000;
+  const src = ctx.createBufferSource();
+  src.buffer = buf; src.connect(ctx.destination);
+  playHead = Math.max(playHead, ctx.currentTime);
+  src.start(playHead); playHead += buf.duration;
+  playing.push(src);
+  src.onended = () => { playing = playing.filter(s => s !== src); };
+}
+
+function stopPlayback() { playing.forEach(s => { try { s.stop(); } catch {} }); playing = []; playHead = 0; }
+
+const TOOLS = [{
+  type: "function", name: "submit_game_goal",
+  description: "Submit one typed Minecraft goal. Use stop when the player asks you to stop. Allowed goals are follow, stop, approach, gather, give, defend, retreat, and report. Never claim a game action succeeded unless its result confirms success.",
+  parameters: {
+    type: "object",
+    properties: {
+      kind: { type: "string", enum: ["follow", "stop", "approach", "gather", "give", "defend", "retreat", "report"] },
+      args: { type: "object", additionalProperties: true },
+    },
+    required: ["kind", "args"],
+    additionalProperties: false,
+  },
+}];
+async function runTool(name, args) {
+  if (name !== "submit_game_goal") return { error: "unknown tool" };
+  const interruptGeneration = speechInterruptGeneration;
+  const res = await localFetch("/api/game-goal", { method: "POST", body: JSON.stringify(args) });
+  const result = await res.json();
+  if (!res.ok) return { accepted: false, error: result.error || `Request failed (${res.status})` };
+  outstandingGoal = true;
+  acceptedGoalGeneration += 1;
+  if (speechStartedAt !== null) {
+    log("sys", `· voice-to-scheduler-accept: ${(performance.now() - speechStartedAt).toFixed(0)} ms`);
+  }
+  if (speechInterruptGeneration !== interruptGeneration) {
+    const stopGeneration = acceptedGoalGeneration;
+    const stop = await localFetch("/api/game-stop", { method: "POST", body: "{}" });
+    if (stop.ok && acceptedGoalGeneration === stopGeneration) outstandingGoal = false;
+    else if (!stop.ok) log("sys", `· interrupted goal stop unavailable: ${await errText(stop)}`);
+  }
+  return { accepted: true, ...result };
+}
+
+function send(obj) { ws.send(JSON.stringify(obj)); }
+
+$("rtStart").onclick = async () => {
+  $("rtStart").disabled = true;
+  try {
+    setStatus($("rtStatus"), "minting key…");
+    const res = await localFetch("/api/realtime-key", { method: "POST", body: "{}" });
+    if (!res.ok) throw new Error(`${res.status}: ${await errText(res)}`);
+    const { value: ephKey } = await res.json();
+
+    ctx = new AudioContext({ sampleRate: RATE });
+    micStream = await navigator.mediaDevices.getUserMedia({ audio: { echoCancellation: true, noiseSuppression: true, channelCount: 1 } });
+
+    setStatus($("rtStatus"), "connecting…");
+    ws = new WebSocket("wss://api.boson.ai/v1/realtime", ["realtime", `bai-client-secret.${ephKey}`]);
+    ws.onopen = () => {
+      send({ type: "session.update", session: {
+        model: "higgs-realtime",
+        instructions: "You are Boson, a friendly, concise Minecraft teammate. Speak naturally in one or two sentences. Submit spoken Minecraft actions through submit_game_goal; the local scheduler validates them. Be transparent that the Minecraft adapter is not connected if the tool reports that. Treat a new player utterance as an interruption: stop the current game action immediately, then listen to the new request. Never claim an action happened without a confirmed result.",
+        audio: {
+          input: { turn_detection: { type: "server_vad" }, transcription: { model: "higgs-stt-3.1" } },
+          output: { voice: "default" },
+        },
+        tools: TOOLS,
+      }});
+      // Stream the mic as 24 kHz PCM16.
+      const source = ctx.createMediaStreamSource(micStream);
+      processor = ctx.createScriptProcessor(2048, 1, 1);
+      processor.onaudioprocess = e => {
+        if (ws?.readyState === 1) send({ type: "input_audio_buffer.append", audio: b64FromPcm(e.inputBuffer.getChannelData(0)) });
+      };
+      source.connect(processor); processor.connect(ctx.destination);
+      setStatus($("rtStatus"), "connected, start talking", "ok");
+      $("rtStop").disabled = false;
+      sessionEndsAt = Date.now() + MAX_SESSION_MS;
+      clearTimeout(sessionTimer);
+      clearInterval(countdownTimer);
+      countdownTimer = setInterval(() => {
+        const remaining = Math.max(0, sessionEndsAt - Date.now());
+        const seconds = Math.ceil(remaining / 1000);
+        const label = `${Math.floor(seconds / 60)}:${String(seconds % 60).padStart(2, "0")}`;
+        const warning = remaining <= SESSION_WARNING_MS;
+        $("rtReminder").textContent = warning
+          ? `Automatic disconnect in ${label}. Finish your test and save anything you need.`
+          : `Short test session: ${label} remaining. It will disconnect automatically.`;
+        $("rtReminder").className = warning ? "sub status bad" : "sub";
+      }, 1000);
+      sessionTimer = setTimeout(() => {
+        setStatus($("rtStatus"), "5-minute limit reached; disconnected", "bad");
+        log("sys", "· automatic disconnect: 5-minute session limit reached");
+        stopRealtime();
+      }, MAX_SESSION_MS);
+      log("sys", "· session open");
+    };
+    ws.onmessage = async e => {
+      try { await handleEvent(JSON.parse(e.data)); }
+      catch (error) {
+        log("sys", "· event handling failed: " + error.message);
+        setStatus($("rtStatus"), "event handling failed", "bad");
+      }
+    };
+    ws.onclose = e => { log("sys", `· closed (code ${e.code}${e.reason ? ", " + e.reason : ""})`); stopRealtime(); };
+    ws.onerror = () => setStatus($("rtStatus"), "websocket error", "bad");
+  } catch (e) {
+    setStatus($("rtStatus"), e.message, "bad");
+    stopRealtime();
+  }
+};
+
+async function handleEvent(ev) {
+  switch (ev.type) {
+    case "input_audio_buffer.speech_started":
+      speechInterruptGeneration += 1;
+      speechStartedAt = performance.now();
+      firstAudioMeasured = false;
+      stopPlayback(); // barge-in: cut the assistant off locally
+      if (responseInProgress && ws?.readyState === 1) send({ type: "response.cancel" });
+      if (outstandingGoal) {
+        const stopGeneration = acceptedGoalGeneration;
+        localFetch("/api/game-stop", { method: "POST", body: "{}" })
+          .then(async res => {
+            if (!res.ok) log("sys", `· local stop unavailable: ${await errText(res)}`);
+            else if (acceptedGoalGeneration === stopGeneration) outstandingGoal = false;
+          })
+          .catch(() => log("sys", "· local stop unavailable: scheduler is not running"));
+      }
+      setStatus($("rtStatus"), "listening…", "ok");
+      break;
+    case "conversation.item.input_audio_transcription.completed":
+      log("you", "You: " + ev.transcript);
+      break;
+    case "response.output_audio.delta":
+      if (speechStartedAt !== null && !firstAudioMeasured) {
+        firstAudioMeasured = true;
+        log("sys", `· voice-to-first-audio: ${(performance.now() - speechStartedAt).toFixed(0)} ms`);
+      }
+      playPcm(ev.delta);
+      break;
+    case "response.output_audio_transcript.delta":
+      if (!botLine) botLine = log("bot", "Assistant: ");
+      botLine.textContent += ev.delta;
+      break;
+    case "response.created":
+      responseInProgress = true;
+      break;
+    case "response.output_audio_transcript.done":
+      lastReply = ev.transcript || lastReply;
+      botLine = null;
+      break;
+    case "response.done": {
+      responseInProgress = false;
+      const calls = (ev.response?.output || []).filter(o => o.type === "function_call");
+      const responseInterruptGeneration = speechInterruptGeneration;
+      for (const c of calls) {
+        let result;
+        if (speechInterruptGeneration !== responseInterruptGeneration) {
+          result = { accepted: false, error: "Interrupted before scheduling; new speech takes priority." };
+        } else {
+          try { result = await runTool(c.name, JSON.parse(c.arguments || "{}")); }
+          catch (error) { result = { accepted: false, error: error.message }; }
+        }
+        log("tool", `🔧 ${c.name}(${c.arguments || ""}) → ${JSON.stringify(result)}`);
+        send({ type: "conversation.item.create", item: { type: "function_call_output", call_id: c.call_id, output: JSON.stringify(result) } });
+      }
+      if (calls.length) send({ type: "response.create" });
+      botLine = null;
+      break;
+    }
+    case "error":
+      log("sys", "· error: " + (ev.error?.message || JSON.stringify(ev.error)));
+      setStatus($("rtStatus"), ev.error?.type || "error", "bad");
+      break;
+  }
+}
+
+function stopRealtime() {
+  clearTimeout(sessionTimer); sessionTimer = null;
+  clearInterval(countdownTimer); countdownTimer = null;
+  sessionEndsAt = 0;
+  stopPlayback();
+  responseInProgress = false;
+  outstandingGoal = false;
+  speechStartedAt = null;
+  processor?.disconnect(); processor = null;
+  micStream?.getTracks().forEach(t => t.stop()); micStream = null;
+  if (ws && ws.readyState <= 1) ws.close();
+  ws = null;
+  ctx?.close(); ctx = null;
+  $("rtStart").disabled = false; $("rtStop").disabled = true;
+  $("rtReminder").textContent = "Press Start to begin a short smoke test.";
+  $("rtReminder").className = "sub";
+  if (!$("rtStatus").classList.contains("bad")) setStatus($("rtStatus"), "idle");
+}
+$("rtStop").onclick = stopRealtime;
+
+// ---------- 3. Avatar ----------
+$("avUseLast").onclick = () => {
+  if (lastReply) $("avText").value = lastReply;
+  else setStatus($("avStatus"), "no Realtime reply yet", "bad");
+};
+
+const fileToDataUri = f => new Promise((ok, fail) => {
+  const r = new FileReader(); r.onload = () => ok(r.result); r.onerror = fail; r.readAsDataURL(f);
+});
+
+$("avBtn").onclick = async () => {
+  $("avBtn").disabled = true;
+  try {
+    const file = $("avImage").files[0];
+    setStatus($("avStatus"), "submitting…");
+    const t0 = performance.now();
+    const res = await localFetch("/api/avatar", { method: "POST", body: JSON.stringify({
+      text: $("avText").value, voice: $("avVoice").value,
+      image: file ? await fileToDataUri(file) : null,
+    })});
+    if (!res.ok) throw new Error(`${res.status}: ${await errText(res)}`);
+    let video = await res.json();
+    while (video.status !== "completed") {
+      if (video.status === "failed") throw new Error(JSON.stringify(video.error));
+      setStatus($("avStatus"), `${video.status}${video.progress != null ? " " + video.progress + "%" : ""}…`);
+      await new Promise(r => setTimeout(r, 2000));
+      const s = await localFetch(`/api/avatar/${encodeURIComponent(video.id)}`);
+      if (!s.ok) throw new Error(`${s.status}: ${await errText(s)}`);
+      video = await s.json();
+    }
+    const el = $("avVideo");
+    const media = await localFetch(`/api/avatar/${encodeURIComponent(video.id)}/content`);
+    if (!media.ok) throw new Error(`${media.status}: ${await errText(media)}`);
+    el.src = URL.createObjectURL(await media.blob());
+    el.hidden = false; el.play();
+    setStatus($("avStatus"), `OK in ${((performance.now() - t0) / 1000).toFixed(0)}s`, "ok");
+  } catch (e) { setStatus($("avStatus"), e.message, "bad"); }
+  $("avBtn").disabled = false;
+};
+</script>
+</body>
+</html>
