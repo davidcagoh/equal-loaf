@@ -205,14 +205,24 @@ class Handler(BaseHTTPRequestHandler):
             return None
 
     def do_GET(self) -> None:
-        if not self._trusted_request():
+        path = urlsplit(self.path).path
+        if not self._trusted_request(require_token=path == "/api/status"):
             self.send_json(403, {"error": "Request origin is not allowed."})
             return
-        path = urlsplit(self.path).path
         if path in {"/", "/index.html"}:
             html = (ROOT / "index.html").read_text(encoding="utf-8")
             html = html.replace("__LOCAL_API_TOKEN__", self.server.api_token)
             self.send_body(200, "text/html; charset=utf-8", html.encode("utf-8"))
+            return
+        if path == "/api/status":
+            request = urllib.request.Request("http://127.0.0.1:8001/status")
+            try:
+                with urllib.request.urlopen(request, timeout=2) as response:
+                    self.send_body(response.status, response.headers.get("Content-Type", "application/json"), response.read())
+            except urllib.error.HTTPError as error:
+                self.send_body(error.code, error.headers.get("Content-Type", "application/json"), error.read())
+            except OSError:
+                self.send_json(503, {"error": "The local goal scheduler is not running."})
             return
         match = re.fullmatch(r"/api/avatar/([A-Za-z0-9_-]{1,120})(/content)?", path)
         if match:

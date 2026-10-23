@@ -19,6 +19,10 @@
   button.ghost { background:transparent; color:var(--fg); border:1px solid var(--line); }
   button:disabled { opacity:.45; cursor:default; }
   .status { font-size:13px; color:var(--mute); }
+  .overlay { display:grid; grid-template-columns:repeat(auto-fit,minmax(180px,1fr)); gap:8px; margin-top:10px; }
+  .overlay > div { background:#0b0d11; border:1px solid var(--line); border-radius:6px; padding:8px; min-width:0; }
+  .overlay strong { display:block; font-size:12px; color:var(--mute); font-weight:500; }
+  .overlay span { display:block; overflow-wrap:anywhere; }
   .status.ok { color:var(--ok); } .status.bad { color:var(--bad); }
   #log { height:220px; overflow:auto; background:#0b0d11; border:1px solid var(--line); border-radius:6px; padding:8px; font-size:13px; margin-top:8px; }
   #log div { margin:2px 0; } .you { color:var(--acc); } .bot { color:var(--fg); } .tool { color:#e0b24f; } .sys { color:var(--mute); }
@@ -54,6 +58,16 @@
     </div>
     <input id="vadThreshold" type="range" min="0.50" max="0.90" step="0.05" value="0.70" aria-describedby="vadHelp">
     <p id="vadHelp" class="sub">Lower values catch quieter speech; higher values reject more game noise. Tune after checking your microphone level.</p>
+    <div class="overlay" role="region" aria-label="Companion status">
+      <div><strong>Game adapter</strong><span id="adapterState" role="status" aria-live="polite" aria-atomic="true">checking…</span></div>
+      <div><strong>Current goal</strong><span id="currentGoal" role="status" aria-live="polite" aria-atomic="true">none</span></div>
+      <div><strong>Speech</strong><span id="speechState" role="status" aria-live="polite" aria-atomic="true">waiting</span></div>
+      <div><strong>Last action event</strong><span id="actionState" role="status" aria-live="polite" aria-atomic="true">waiting</span></div>
+    </div>
+    <div class="row">
+      <button id="actionStop" class="ghost">Stop game action</button>
+      <span id="actionStopStatus" class="status" role="status" aria-live="polite" aria-atomic="true"></span>
+    </div>
     <div class="row">
       <button id="rtStart">Start</button>
       <button id="rtStop" class="ghost" disabled>Stop</button>
@@ -90,7 +104,42 @@ const VOICES = ["default", "chloe", "eleanor", "jake", "marcus", "nora", "oliver
 for (const sel of [$("ttsVoice"), $("avVoice")]) sel.innerHTML = VOICES.map(v => `<option>${v}</option>`).join("");
 
 function setStatus(el, text, kind = "") { el.textContent = text; el.className = "status " + kind; }
+function setLiveText(el, text) { if (el.textContent !== text) el.textContent = text; }
+function formatGoal(goal) { return goal ? `${goal.kind} · ${goal.id}` : "none"; }
+function renderSchedulerStatus(state) {
+  setLiveText($("adapterState"), state.ready ? "connected" : "not connected");
+  setLiveText($("currentGoal"), formatGoal(state.currentGoal));
+  const actionEvent = [...(state.events || [])].reverse().find(event => event.type.startsWith("action."));
+  setLiveText($("actionState"), actionEvent
+    ? `${actionEvent.type.replace("action.", "")} · ${actionEvent.goalId}${actionEvent.reason ? ` · ${actionEvent.reason}` : ""}${actionEvent.detail ? ` · ${actionEvent.detail}` : ""}`
+    : "waiting");
+}
+async function pollSchedulerStatus() {
+  try {
+    const res = await localFetch("/api/status", { method: "GET" });
+    if (!res.ok) throw new Error(await errText(res));
+    renderSchedulerStatus(await res.json());
+  } catch (error) {
+    setLiveText($("adapterState"), "scheduler unavailable");
+    setLiveText($("actionState"), error.message);
+  }
+}
 async function errText(res) { const t = await res.text(); try { return JSON.parse(t).error?.message || t; } catch { return t; } }
+
+// ---------- Scheduler status overlay ----------
+pollSchedulerStatus();
+setInterval(pollSchedulerStatus, 1000);
+$("actionStop").onclick = async () => {
+  $("actionStop").disabled = true;
+  setStatus($("actionStopStatus"), "stopping…");
+  try {
+    const res = await localFetch("/api/game-stop", { method: "POST", body: "{}" });
+    const result = await res.json();
+    if (!res.ok) throw new Error(result.error || `Request failed (${res.status})`);
+    setStatus($("actionStopStatus"), result.status === "completed" ? "stopped" : `stop ${result.status}`, result.status === "completed" ? "ok" : "bad");
+  } catch (error) { setStatus($("actionStopStatus"), error.message, "bad"); }
+  finally { $("actionStop").disabled = false; }
+};
 
 // ---------- 1. TTS ----------
 $("ttsBtn").onclick = async () => {
@@ -257,6 +306,7 @@ $("rtStart").onclick = async () => {
 async function handleEvent(ev) {
   switch (ev.type) {
     case "input_audio_buffer.speech_started":
+      setLiveText($("speechState"), "listening");
       speechInterruptGeneration += 1;
       speechStartedAt = performance.now();
       firstAudioMeasured = false;
@@ -274,6 +324,7 @@ async function handleEvent(ev) {
       setStatus($("rtStatus"), "listening…", "ok");
       break;
     case "conversation.item.input_audio_transcription.completed":
+      setLiveText($("speechState"), ev.transcript ? `heard: ${ev.transcript}` : "speech received");
       log("you", "You: " + ev.transcript);
       break;
     case "response.output_audio.delta":
@@ -292,6 +343,7 @@ async function handleEvent(ev) {
       break;
     case "response.output_audio_transcript.done":
       lastReply = ev.transcript || lastReply;
+      setLiveText($("speechState"), lastReply ? `replied: ${lastReply}` : "response complete");
       botLine = null;
       break;
     case "response.done": {

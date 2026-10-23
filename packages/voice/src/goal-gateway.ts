@@ -1,7 +1,7 @@
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from 'node:http';
 import { randomUUID } from 'node:crypto';
 import { GoalScheduler } from '../../scheduler/src/index.ts';
-import { parseGoalProposal, type Goal, type GoalResult } from '../../contracts/src/index.ts';
+import { parseGoalProposal, type CompanionEvent, type Goal, type GoalResult } from '../../contracts/src/index.ts';
 
 const allowedKinds = ['follow', 'stop', 'approach', 'gather', 'give', 'defend', 'retreat', 'report'] as const;
 const maxBodyBytes = 16 * 1024;
@@ -45,7 +45,12 @@ export function createGoalGateway(options: GoalGatewayOptions): { server: Server
   if (!['127.0.0.1', 'localhost', '::1'].includes(host)) {
     throw new TypeError('Goal gateway must bind to a loopback address');
   }
-  const scheduler = new GoalScheduler(options.execute, options.onEvent);
+  const events: CompanionEvent[] = [];
+  const scheduler = new GoalScheduler(options.execute, (event) => {
+    events.push(event);
+    if (events.length > 100) events.shift();
+    options.onEvent?.(event);
+  });
   const isReady = options.isReady ?? (() => true);
   const server = createServer(async (request, response) => {
     const address = server.address();
@@ -60,6 +65,16 @@ export function createGoalGateway(options: GoalGatewayOptions): { server: Server
     }
     if (request.method === 'GET' && request.url === '/health') {
       respond(response, 200, { ready: isReady() });
+      return;
+    }
+    if (request.method === 'GET' && request.url === '/status') {
+      respond(response, 200, {
+        ready: isReady(),
+        objective: scheduler.objective ?? null,
+        currentGoal: scheduler.currentGoal ?? null,
+        queuedGoals: scheduler.queuedGoals,
+        events,
+      });
       return;
     }
     if (request.method !== 'POST' || !['/goals', '/stop'].includes(request.url ?? '')) {

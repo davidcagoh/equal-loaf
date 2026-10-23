@@ -1,6 +1,6 @@
 # Boson API demo
 
-This collaborator-provided local demo exercises Boson Realtime, TTS, and Avatar APIs. Realtime can submit whitelisted Minecraft goals to the typed Beads scheduler. The goal gateway fails closed while no Minecraft adapter is connected. Keep credentials outside Git; root `.env`, `.api`, `BOSON_API_KEY`, and `BOSON_API_KEY_100` are supported.
+This collaborator-provided local demo exercises Boson Realtime, TTS, and Avatar APIs. Realtime can submit whitelisted Minecraft goals to the typed Beads scheduler. The goal gateway fails closed while no Minecraft adapter is connected. The Realtime panel shows adapter readiness, speech, the current goal, and recent action outcomes, with a local stop control. Keep credentials outside Git; root `.env`, `.api`, `BOSON_API_KEY`, and `BOSON_API_KEY_100` are supported.
 
 ## Endpoints and workflow fit
 

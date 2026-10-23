@@ -12,6 +12,7 @@ interface ActiveAction {
   goal: Goal;
   controller: AbortController;
   token: number;
+  startedAt: number;
   cancellationConfirmed: boolean;
   promise: Promise<void>;
 }
@@ -112,6 +113,7 @@ export class GoalScheduler {
     this.publish({ type: 'goal.accepted', goalId: id });
     const stopGoal: Goal = { id, kind: 'stop', priority: 'emergency', source: 'voice', args: {} };
     const controller = new AbortController();
+    const startedAt = Date.now();
     this.publish({ type: 'action.started', goalId: id });
     let stopTimer: ReturnType<typeof setTimeout> | undefined;
     let stopResult: GoalResult = { status: 'failed', detail: 'Stop action did not complete' };
@@ -124,13 +126,13 @@ export class GoalScheduler {
         }, this.timeoutMs); }),
       ]);
       if (stopTimer) clearTimeout(stopTimer);
-      if (stopResult.status === 'completed') this.publish({ type: 'action.completed', goalId: id, detail: stopResult.detail });
-      else if (stopResult.status === 'cancelled') this.publish({ type: 'action.cancelled', goalId: id, reason: stopResult.detail });
-      else this.publish({ type: 'action.failed', goalId: id, reason: stopResult.detail ?? `Stop ${stopResult.status}` });
+      if (stopResult.status === 'completed') this.publish({ type: 'action.completed', goalId: id, detail: stopResult.detail, latencyMs: Date.now() - startedAt });
+      else if (stopResult.status === 'cancelled') this.publish({ type: 'action.cancelled', goalId: id, reason: stopResult.detail, latencyMs: Date.now() - startedAt });
+      else this.publish({ type: 'action.failed', goalId: id, reason: stopResult.detail ?? `Stop ${stopResult.status}`, latencyMs: Date.now() - startedAt });
     } catch (error) {
       if (stopTimer) clearTimeout(stopTimer);
       stopResult = { status: 'failed', detail: error instanceof Error ? error.message : String(error) };
-      this.publish({ type: 'action.failed', goalId: id, reason: stopResult.detail! });
+      this.publish({ type: 'action.failed', goalId: id, reason: stopResult.detail!, latencyMs: Date.now() - startedAt });
     } finally {
       this.stopInProgress = false;
       if (this.queue.length > 0) {
@@ -180,7 +182,7 @@ export class GoalScheduler {
     const goal = this.queue.shift()!;
     const controller = new AbortController();
     const token = ++this.sequence;
-    const action: ActiveAction = { goal, controller, token, cancellationConfirmed: false, promise: Promise.resolve() };
+    const action: ActiveAction = { goal, controller, token, startedAt: Date.now(), cancellationConfirmed: false, promise: Promise.resolve() };
     this.active = action;
     this.publish({ type: 'goal.accepted', goalId: goal.id });
     this.publish({ type: 'action.started', goalId: goal.id });
@@ -202,26 +204,26 @@ export class GoalScheduler {
       const result = await Promise.race([actual, timed]);
       if (this.active?.token !== action.token) return;
       if (timedOut) {
-        this.publish({ type: 'action.failed', goalId: action.goal.id, reason: result.detail ?? 'Action timed out' });
+        this.publish({ type: 'action.failed', goalId: action.goal.id, reason: result.detail ?? 'Action timed out', latencyMs: Date.now() - action.startedAt });
         await this.recovery?.(action.goal, result.detail ?? 'Action timed out');
       } else if (action.controller.signal.aborted) {
         if (result.status === 'cancelled') {
           action.cancellationConfirmed = true;
-          this.publish({ type: 'action.cancelled', goalId: action.goal.id, reason: action.controller.signal.reason as string });
+          this.publish({ type: 'action.cancelled', goalId: action.goal.id, reason: action.controller.signal.reason as string, latencyMs: Date.now() - action.startedAt });
         }
       } else if (result.status === 'completed') {
-        this.publish({ type: 'action.completed', goalId: action.goal.id, detail: result.detail });
+        this.publish({ type: 'action.completed', goalId: action.goal.id, detail: result.detail, latencyMs: Date.now() - action.startedAt });
       } else if (result.status === 'cancelled') {
         action.cancellationConfirmed = true;
-        this.publish({ type: 'action.cancelled', goalId: action.goal.id, reason: result.detail });
+        this.publish({ type: 'action.cancelled', goalId: action.goal.id, reason: result.detail, latencyMs: Date.now() - action.startedAt });
       } else {
-        this.publish({ type: 'action.failed', goalId: action.goal.id, reason: result.detail ?? `Action ${result.status}` });
+        this.publish({ type: 'action.failed', goalId: action.goal.id, reason: result.detail ?? `Action ${result.status}`, latencyMs: Date.now() - action.startedAt });
         if (result.status === 'failed') await this.recovery?.(action.goal, result.detail ?? 'Action failed');
       }
     } catch (error) {
       if (this.active?.token === action.token) {
         const reason = error instanceof Error ? error.message : String(error);
-        this.publish({ type: 'action.failed', goalId: action.goal.id, reason });
+        this.publish({ type: 'action.failed', goalId: action.goal.id, reason, latencyMs: Date.now() - action.startedAt });
         await this.recovery?.(action.goal, reason);
       }
     } finally {

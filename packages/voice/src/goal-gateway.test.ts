@@ -89,3 +89,48 @@ test('refuses to bind the goal gateway outside loopback', () => {
     execute: async () => ({ status: 'completed' }),
   }), /loopback/);
 });
+
+
+test('exposes readiness, active goals, and timestamped lifecycle events for the demo overlay', async () => {
+  let finish!: (result: { status: 'completed'; detail: string }) => void;
+  const gateway = createGoalGateway({
+    port: 0,
+    execute: async () => await new Promise((resolve) => { finish = resolve; }),
+  });
+  await new Promise<void>((resolve) => gateway.server.once('listening', resolve));
+  const address = gateway.server.address();
+  assert.ok(address && typeof address !== 'string');
+  const base = `http://127.0.0.1:${address.port}`;
+  try {
+    const initial = await fetch(`${base}/status`);
+    assert.equal(initial.status, 200);
+    assert.deepEqual(await initial.json(), {
+      ready: true,
+      objective: null,
+      currentGoal: null,
+      queuedGoals: [],
+      events: [],
+    });
+
+    const accepted = await fetch(`${base}/goals`, {
+      method: 'POST', headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ kind: 'follow', args: { target: 'player' } }),
+    });
+    assert.equal(accepted.status, 202);
+    const active = await fetch(`${base}/status`).then((response) => response.json());
+    assert.equal(active.currentGoal.kind, 'follow');
+    assert.equal(active.events.at(-1).type, 'action.started');
+    assert.equal(typeof active.events.at(-1).eventId, 'string');
+    assert.equal(typeof active.events.at(-1).timestamp, 'number');
+
+    finish({ status: 'completed', detail: 'Reached player' });
+    await gateway.scheduler.drain();
+    const completed = await fetch(`${base}/status`).then((response) => response.json());
+    assert.equal(completed.currentGoal, null);
+    assert.equal(completed.events.at(-1).type, 'action.completed');
+    assert.equal(completed.events.at(-1).detail, 'Reached player');
+    assert.equal(typeof completed.events.at(-1).latencyMs, 'number');
+  } finally {
+    await new Promise<void>((resolve, reject) => gateway.server.close((error) => error ? reject(error) : resolve()));
+  }
+});
