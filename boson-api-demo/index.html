@@ -49,6 +49,12 @@
     <p class="sub">Sessions end automatically after 5 minutes. Spoken game goals go through the local typed scheduler; Minecraft actions remain unavailable until a game adapter is connected.</p>
     <p id="rtReminder" class="sub">Press Start to connect the microphone and begin a short test.</p>
     <div class="row">
+      <label for="vadThreshold" class="sub">Voice detection threshold</label>
+      <output id="vadValue" for="vadThreshold" aria-live="polite">0.70</output>
+    </div>
+    <input id="vadThreshold" type="range" min="0.50" max="0.90" step="0.05" value="0.70" aria-describedby="vadHelp">
+    <p id="vadHelp" class="sub">Lower values catch quieter speech; higher values reject more game noise. Tune after checking your microphone level.</p>
+    <div class="row">
       <button id="rtStart">Start</button>
       <button id="rtStop" class="ghost" disabled>Stop</button>
       <span id="rtStatus" class="status">idle</span>
@@ -107,6 +113,7 @@ $("ttsBtn").onclick = async () => {
 const RATE = 24000;
 const MAX_SESSION_MS = 5 * 60 * 1000;
 const SESSION_WARNING_MS = 30 * 1000;
+$("vadThreshold").oninput = () => { $("vadValue").value = Number($("vadThreshold").value).toFixed(2); };
 let ws, ctx, micStream, processor, playHead = 0, playing = [], lastReply = "", botLine = null;
 let responseInProgress = false;
 let outstandingGoal = false, speechStartedAt = null, firstAudioMeasured = false;
@@ -197,7 +204,7 @@ $("rtStart").onclick = async () => {
         model: "higgs-realtime",
         instructions: "You are Boson, a friendly, concise Minecraft teammate. Speak naturally in one or two sentences. Submit spoken Minecraft actions through submit_game_goal; the local scheduler validates them. Be transparent that the Minecraft adapter is not connected if the tool reports that. Treat a new player utterance as an interruption: stop the current game action immediately, then listen to the new request. Never claim an action happened without a confirmed result.",
         audio: {
-          input: { turn_detection: { type: "server_vad" }, transcription: { model: "higgs-stt-3.1" } },
+          input: { turn_detection: { type: "server_vad", threshold: Number($("vadThreshold").value) }, transcription: { model: "higgs-stt-3.1" } },
           output: { voice: "default" },
         },
         tools: TOOLS,
@@ -210,6 +217,7 @@ $("rtStart").onclick = async () => {
       };
       source.connect(processor); processor.connect(ctx.destination);
       setStatus($("rtStatus"), "connected, start talking", "ok");
+      $("vadThreshold").disabled = true;
       $("rtStop").disabled = false;
       sessionEndsAt = Date.now() + MAX_SESSION_MS;
       clearTimeout(sessionTimer);
@@ -325,7 +333,7 @@ function stopRealtime() {
   if (ws && ws.readyState <= 1) ws.close();
   ws = null;
   ctx?.close(); ctx = null;
-  $("rtStart").disabled = false; $("rtStop").disabled = true;
+  $("rtStart").disabled = false; $("rtStop").disabled = true; $("vadThreshold").disabled = false;
   $("rtReminder").textContent = "Press Start to begin a short smoke test.";
   $("rtReminder").className = "sub";
   if (!$("rtStatus").classList.contains("bad")) setStatus($("rtStatus"), "idle");

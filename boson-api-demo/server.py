@@ -251,7 +251,13 @@ class Handler(BaseHTTPRequestHandler):
                 text = require_text(payload)
                 voice = require_voice(payload)
                 endpoint = "/audio/speech"
-                request_body = {"model": "higgs-tts-3", "input": text, "voice": voice}
+                request_body = {
+                    "model": "higgs-tts-3",
+                    "input": text,
+                    "voice": voice,
+                    "normalize": True,
+                    "language": "eng",
+                }
             elif path == "/api/realtime-key":
                 endpoint = "/realtime/client_secrets"
                 request_body = {"expires_after": {"seconds": 600}}
@@ -263,7 +269,13 @@ class Handler(BaseHTTPRequestHandler):
                 request_body = {
                     "model": "higgs-avatar",
                     "ref_image": image or "https://docs.boson.ai/public/avatar/sample.jpg",
-                    "input_tts": {"model": "higgs-tts-3", "input": text, "voice": voice},
+                    "input_tts": {
+                        "model": "higgs-tts-3",
+                        "input": text,
+                        "voice": voice,
+                        "normalize": True,
+                        "language": "eng",
+                    },
                     "size": "640x640",
                 }
         except ValueError as error:

@@ -6,7 +6,7 @@ This collaborator-provided local demo exercises Boson Realtime, TTS, and Avatar 
 
 | Demo | Endpoint | What it does | Fit |
 |---|---|---|---|
-| Higgs TTS | `POST /audio/speech` (`higgs-tts-3`) | Generates narration audio from text and a selected voice. | Could supply the voice stage. The current demo returns audio only; word-level timestamps require a non-streaming request with `timestamps: true` and are not wired into this UI. |
+| Higgs TTS | `POST /audio/speech` (`higgs-tts-3`) | Generates narration audio from text and a selected voice. | Could supply the voice stage. Requests use the current `normalize` and ISO 639-3 `language` fields (`eng` for this English demo). The local text limit is 5,000 characters; streaming requests can support up to 50,000, but streaming TTS is not wired into this UI. The demo returns audio only; word-level timestamps require a non-streaming request with `timestamps: true` and are not wired into this UI. |
 | Higgs Realtime | `POST /realtime/client_secrets`, then browser WebSocket | Mints an ephemeral credential (requested lifetime: 600 seconds) for direct browser voice conversation and tool calling. The browser disconnects after five minutes and turns off the microphone. Speech interruption stops local playback and requests scheduler cancellation. | Interactive companion voice path; action execution requires a connected Minecraft adapter. |
 | Higgs Avatar | `POST /videos` (`higgs-avatar`) | Creates a speaking portrait from narration and an optional still image, then polls and retrieves the MP4. | Tests portrait narration/lip-sync. It does not animate a sequence of illustrated scenes and is not a substitute for SSKU-style scene motion. |
 
@@ -23,7 +23,7 @@ The broader workflow is **approved transcript → voice → timing/alignment →
   bash scripts/start-companion-demo.sh
   ```
 
-- Open `http://127.0.0.1:8000`. The browser connects to Boson for Realtime; it may request microphone access. TTS and Avatar buttons submit paid API requests. Local request limits are 10 TTS, 5 Realtime-key, and 3 Avatar requests per hour. Realtime auto-disconnects after five minutes.
+- Open `http://127.0.0.1:8000`. The browser connects to Boson for Realtime; it may request microphone access. Server VAD threshold defaults to 0.70 and can be tuned in the UI (the provider default is now 0.85). TTS and Avatar buttons submit paid API requests. Local request limits are 10 TTS, 5 Realtime-key, and 3 Avatar requests per hour. Realtime auto-disconnects after five minutes.
 
 ## Cost and authorization
 
