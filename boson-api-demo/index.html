@@ -195,7 +195,9 @@ function b64FromPcm(float32) {
 
 function playPcm(b64) {
   const bytes = Uint8Array.from(atob(b64), c => c.charCodeAt(0));
-  const pcm = new Int16Array(bytes.buffer);
+  const sampleCount = Math.floor(bytes.byteLength / Int16Array.BYTES_PER_ELEMENT);
+  if (!ctx || sampleCount === 0) return;
+  const pcm = new Int16Array(bytes.buffer, bytes.byteOffset, sampleCount);
   const buf = ctx.createBuffer(1, pcm.length, RATE);
   const ch = buf.getChannelData(0);
   for (let i = 0; i < pcm.length; i++) ch[i] = pcm[i] / 0x8000;
@@ -279,6 +281,7 @@ $("rtStart").onclick = async () => {
     const { value: ephKey } = await res.json();
 
     ctx = new AudioContext({ sampleRate: RATE });
+    setStatus($("rtStatus"), "requesting microphone…");
     micStream = await navigator.mediaDevices.getUserMedia({ audio: { echoCancellation: true, noiseSuppression: true, channelCount: 1 } });
 
     setStatus($("rtStatus"), "connecting…");
