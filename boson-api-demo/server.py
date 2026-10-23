@@ -27,7 +27,6 @@ VOICE_NAMES = {"default", "chloe", "eleanor", "jake", "marcus", "nora", "oliver"
 GOAL_KINDS = {"follow", "stop", "approach", "gather", "give", "defend", "retreat", "report"}
 RATE_LIMITS = {
     "/api/tts": (10, 3600),
-    "/api/realtime-key": (5, 3600),
     "/api/avatar": (3, 3600),
     "/api/game-goal": (30, 3600),
 }
