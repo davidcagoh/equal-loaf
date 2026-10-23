@@ -177,3 +177,94 @@ test('exposes readiness, active goals, and timestamped lifecycle events for the 
     await new Promise<void>((resolve, reject) => gateway.server.close((error) => error ? reject(error) : resolve()));
   }
 });
+
+test('preserves the saved objective through stop and retreat while allowing relevant task actions to update it', async () => {
+  const executed: Goal[] = [];
+  const gateway = createGoalGateway({
+    port: 0,
+    execute: async (goal, signal) => {
+      executed.push(goal);
+      if (goal.kind === 'follow') {
+        return await new Promise((resolve) => {
+          signal.addEventListener('abort', () => resolve({ status: 'cancelled', detail: 'Follow interrupted' }), { once: true });
+        });
+      }
+      return { status: 'completed', detail: `${goal.kind} completed` };
+    },
+  });
+  await new Promise<void>((resolve) => gateway.server.once('listening', resolve));
+  const address = gateway.server.address();
+  assert.ok(address && typeof address !== 'string');
+  const base = `http://127.0.0.1:${address.port}`;
+  try {
+    const follow = await fetch(`${base}/goals`, {
+      method: 'POST', headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ kind: 'follow', args: { target: 'player' }, objective: 'Build a house together' }),
+    });
+    assert.equal(follow.status, 202);
+    const followId = (await follow.json()).goalId as string;
+
+    const stopped = await fetch(`${base}/stop`, {
+      method: 'POST', headers: { 'content-type': 'application/json' }, body: '{}',
+    });
+    assert.equal(stopped.status, 200);
+    assert.equal((await stopped.json()).objective, 'Build a house together');
+
+    const retreat = await fetch(`${base}/goals`, {
+      method: 'POST', headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ kind: 'retreat', args: {}, objective: 'Return to spawn' }),
+    });
+    assert.equal(retreat.status, 202);
+    const retreatId = (await retreat.json()).goalId as string;
+    await gateway.scheduler.drain();
+
+    const afterRetreat = await fetch(`${base}/status`).then((response) => response.json());
+    assert.equal(afterRetreat.objective, 'Build a house together');
+    assert.equal(afterRetreat.events.some((event: { goalId: string; type: string }) => event.goalId === followId && event.type === 'action.cancelled'), true);
+    assert.equal(afterRetreat.events.some((event: { goalId: string; type: string }) => event.goalId === retreatId && event.type === 'action.completed'), true);
+
+    for (const tacticalGoal of [
+      { kind: 'report', args: {}, objective: 'A skeleton is approaching from the east' },
+      { kind: 'defend', args: { target: 'player' }, objective: 'Protect the player from the skeleton' },
+    ]) {
+      const response = await fetch(`${base}/goals`, {
+        method: 'POST', headers: { 'content-type': 'application/json' },
+        body: JSON.stringify(tacticalGoal),
+      });
+      assert.equal(response.status, 202);
+      assert.equal((await response.json()).objective, 'Build a house together');
+      await gateway.scheduler.drain();
+      const status = await fetch(`${base}/status`).then((result) => result.json());
+      assert.equal(status.objective, 'Build a house together');
+    }
+
+    const gather = await fetch(`${base}/goals`, {
+      method: 'POST', headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ kind: 'gather', args: { item: 'oak_log' }, objective: 'Gather wood for the house' }),
+    });
+    assert.equal(gather.status, 202);
+    assert.equal((await gather.json()).objective, 'Gather wood for the house');
+    await gateway.scheduler.drain();
+    const afterGather = await fetch(`${base}/status`).then((response) => response.json());
+    assert.equal(afterGather.objective, 'Gather wood for the house');
+
+    for (const taskGoal of [
+      { kind: 'approach', args: { target: 'player' }, objective: 'Meet at the house site' },
+      { kind: 'give', args: { item: 'oak_log', target: 'player' }, objective: 'Give the player building materials' },
+    ]) {
+      const response = await fetch(`${base}/goals`, {
+        method: 'POST', headers: { 'content-type': 'application/json' },
+        body: JSON.stringify(taskGoal),
+      });
+      assert.equal(response.status, 202);
+      assert.equal((await response.json()).objective, taskGoal.objective);
+      await gateway.scheduler.drain();
+      const status = await fetch(`${base}/status`).then((result) => result.json());
+      assert.equal(status.objective, taskGoal.objective);
+    }
+
+    assert.deepEqual(executed.map((goal) => goal.kind), ['follow', 'stop', 'retreat', 'report', 'defend', 'gather', 'approach', 'give']);
+  } finally {
+    await new Promise<void>((resolve, reject) => gateway.server.close((error) => error ? reject(error) : resolve()));
+  }
+});

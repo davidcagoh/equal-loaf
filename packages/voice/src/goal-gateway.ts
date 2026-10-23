@@ -5,6 +5,7 @@ import { formatActionOutcome, formatPendingOutcome } from './action-outcome.ts';
 import { parseGoalProposal, type CompanionEvent, type Goal, type GoalResult, type Observation } from '../../contracts/src/index.ts';
 
 const allowedKinds = ['follow', 'stop', 'approach', 'gather', 'give', 'defend', 'retreat', 'report'] as const;
+const objectiveKinds = new Set<Goal['kind']>(['follow', 'approach', 'gather', 'give']);
 const maxBodyBytes = 16 * 1024;
 
 export interface GoalGatewayOptions {
@@ -165,7 +166,7 @@ export function createGoalGateway(options: GoalGatewayOptions): { server: Server
         args: body.args ?? {},
         source: 'voice',
       });
-      if (objective) scheduler.setObjective(objective);
+      if (objective && objectiveKinds.has(kind)) scheduler.setObjective(objective);
       goalKinds.set(goal.id, goal.kind);
       await scheduler.submit(goal);
       respond(response, 202, { goalId: goal.id, status: 'accepted', objective: scheduler.objective ?? null });
