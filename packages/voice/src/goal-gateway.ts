@@ -1,6 +1,7 @@
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from 'node:http';
 import { randomUUID } from 'node:crypto';
 import { GoalScheduler } from '../../scheduler/src/index.ts';
+import { formatActionOutcome, formatPendingOutcome } from './action-outcome.ts';
 import { parseGoalProposal, type CompanionEvent, type Goal, type GoalResult } from '../../contracts/src/index.ts';
 
 const allowedKinds = ['follow', 'stop', 'approach', 'gather', 'give', 'defend', 'retreat', 'report'] as const;
@@ -46,6 +47,7 @@ export function createGoalGateway(options: GoalGatewayOptions): { server: Server
     throw new TypeError('Goal gateway must bind to a loopback address');
   }
   const events: CompanionEvent[] = [];
+  const goalKinds = new Map<string, Goal['kind']>();
   const scheduler = new GoalScheduler(options.execute, (event) => {
     events.push(event);
     if (events.length > 100) events.shift();
@@ -75,6 +77,37 @@ export function createGoalGateway(options: GoalGatewayOptions): { server: Server
         queuedGoals: scheduler.queuedGoals,
         events,
       });
+      return;
+    }
+    if (request.method === 'GET' && request.url?.startsWith('/results/')) {
+      const url = new URL(request.url, `http://${request.headers.host}`);
+      const goalId = url.pathname.slice('/results/'.length);
+      const kinds = url.searchParams.getAll('kind');
+      const requestedKind = kinds.length === 1 ? kinds[0] : null;
+      if (!/^[A-Za-z0-9_-]{1,120}$/.test(goalId)
+        || typeof requestedKind !== 'string' || !(allowedKinds as readonly string[]).includes(requestedKind)) {
+        respond(response, 400, { error: 'A valid goal ID and kind are required' });
+        return;
+      }
+      const kind = goalKinds.get(goalId);
+      if (!kind) {
+        respond(response, 404, { error: 'Goal result was not found' });
+        return;
+      }
+      if (requestedKind !== kind) {
+        respond(response, 400, { error: 'Goal kind does not match the submitted goal' });
+        return;
+      }
+      const terminal = [...events].reverse().find((event): event is Extract<CompanionEvent, {
+        type: 'action.completed' | 'action.cancelled' | 'action.failed';
+      }> => event.goalId === goalId
+        && ['action.completed', 'action.cancelled', 'action.failed'].includes(event.type));
+      if (terminal) {
+        respond(response, 200, formatActionOutcome(kind as Goal['kind'], terminal));
+      } else {
+        const started = events.some((event) => event.goalId === goalId && event.type === 'action.started');
+        respond(response, 202, formatPendingOutcome(kind, started));
+      }
       return;
     }
     if (request.method !== 'POST' || !['/goals', '/stop'].includes(request.url ?? '')) {
@@ -114,6 +147,7 @@ export function createGoalGateway(options: GoalGatewayOptions): { server: Server
         args: body.args ?? {},
         source: 'voice',
       });
+      goalKinds.set(goal.id, goal.kind);
       await scheduler.submit(goal);
       respond(response, 202, { goalId: goal.id, status: 'accepted' });
     } catch (error) {

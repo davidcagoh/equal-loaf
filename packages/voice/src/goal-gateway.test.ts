@@ -117,19 +117,48 @@ test('exposes readiness, active goals, and timestamped lifecycle events for the 
       body: JSON.stringify({ kind: 'follow', args: { target: 'player' } }),
     });
     assert.equal(accepted.status, 202);
+    const acceptedBody = await accepted.json();
+    const goalId = acceptedBody.goalId as string;
+    const pending = await fetch(`${base}/results/${goalId}?kind=follow`);
+    assert.equal(pending.status, 202);
+    assert.match((await pending.json()).message, /has not completed yet/);
+    const wrongKind = await fetch(`${base}/results/${goalId}?kind=gather`);
+    assert.equal(wrongKind.status, 400);
+    const duplicateKind = await fetch(`${base}/results/${goalId}?kind=follow&kind=gather`);
+    assert.equal(duplicateKind.status, 400);
+
+    const queued = await fetch(`${base}/goals`, {
+      method: 'POST', headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ kind: 'follow', args: { target: 'player' } }),
+    });
+    const queuedId = (await queued.json()).goalId as string;
+    const queuedResult = await fetch(`${base}/results/${queuedId}?kind=follow`);
+    assert.equal(queuedResult.status, 202);
+    assert.equal((await queuedResult.json()).status, 'queued');
+    assert.equal(await gateway.scheduler.cancel(queuedId, 'test cleanup'), true);
+
     const active = await fetch(`${base}/status`).then((response) => response.json());
     assert.equal(active.currentGoal.kind, 'follow');
-    assert.equal(active.events.at(-1).type, 'action.started');
-    assert.equal(typeof active.events.at(-1).eventId, 'string');
-    assert.equal(typeof active.events.at(-1).timestamp, 'number');
+    const started = active.events.find((event: { goalId: string; type: string }) => event.goalId === goalId && event.type === 'action.started');
+    assert.ok(started);
+    assert.equal(typeof started.eventId, 'string');
+    assert.equal(typeof started.timestamp, 'number');
 
     finish({ status: 'completed', detail: 'Reached player' });
     await gateway.scheduler.drain();
     const completed = await fetch(`${base}/status`).then((response) => response.json());
     assert.equal(completed.currentGoal, null);
-    assert.equal(completed.events.at(-1).type, 'action.completed');
-    assert.equal(completed.events.at(-1).detail, 'Reached player');
-    assert.equal(typeof completed.events.at(-1).latencyMs, 'number');
+    const terminal = completed.events.find((event: { goalId: string; type: string }) => event.goalId === goalId && event.type === 'action.completed');
+    assert.ok(terminal, JSON.stringify(completed.events));
+    assert.equal(terminal.detail, 'Reached player');
+    assert.equal(typeof terminal.latencyMs, 'number');
+    const outcome = await fetch(`${base}/results/${goalId}?kind=follow`);
+    assert.equal(outcome.status, 200);
+    const outcomeBody = await outcome.json();
+    assert.equal(outcomeBody.status, 'completed');
+    assert.match(outcomeBody.message, /Reached player/);
+    const missing = await fetch(`${base}/results/not-known?kind=follow`);
+    assert.equal(missing.status, 404);
   } finally {
     await new Promise<void>((resolve, reject) => gateway.server.close((error) => error ? reject(error) : resolve()));
   }

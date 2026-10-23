@@ -16,7 +16,7 @@ import urllib.error
 import urllib.request
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
-from urllib.parse import urlsplit
+from urllib.parse import parse_qs, urlencode, urlsplit
 
 ROOT = Path(__file__).parent
 API = "https://api.boson.ai/v1"
@@ -24,6 +24,7 @@ MAX_REQUEST_BYTES = 12 * 1024 * 1024
 MAX_AVATAR_IMAGE_BYTES = 8 * 1024 * 1024
 MAX_TEXT_LENGTH = 5000
 VOICE_NAMES = {"default", "chloe", "eleanor", "jake", "marcus", "nora", "oliver"}
+GOAL_KINDS = {"follow", "stop", "approach", "gather", "give", "defend", "retreat", "report"}
 RATE_LIMITS = {
     "/api/tts": (10, 3600),
     "/api/realtime-key": (5, 3600),
@@ -205,8 +206,10 @@ class Handler(BaseHTTPRequestHandler):
             return None
 
     def do_GET(self) -> None:
-        path = urlsplit(self.path).path
-        if not self._trusted_request(require_token=path == "/api/status"):
+        parsed_path = urlsplit(self.path)
+        path = parsed_path.path
+        result_match = re.fullmatch(r"/api/results/([A-Za-z0-9_-]{1,120})", path)
+        if not self._trusted_request(require_token=path == "/api/status" or result_match is not None):
             self.send_json(403, {"error": "Request origin is not allowed."})
             return
         if path in {"/", "/index.html"}:
@@ -218,6 +221,21 @@ class Handler(BaseHTTPRequestHandler):
             request = urllib.request.Request("http://127.0.0.1:8001/status")
             try:
                 with urllib.request.urlopen(request, timeout=2) as response:
+                    self.send_body(response.status, response.headers.get("Content-Type", "application/json"), response.read())
+            except urllib.error.HTTPError as error:
+                self.send_body(error.code, error.headers.get("Content-Type", "application/json"), error.read())
+            except OSError:
+                self.send_json(503, {"error": "The local goal scheduler is not running."})
+            return
+        if result_match:
+            query = parse_qs(parsed_path.query)
+            kinds = query.get("kind", [])
+            if len(kinds) != 1 or kinds[0] not in GOAL_KINDS:
+                self.send_json(400, {"error": "A valid goal kind is required."})
+                return
+            target = f"http://127.0.0.1:8001/results/{result_match.group(1)}?{urlencode({'kind': kinds[0]})}"
+            try:
+                with urllib.request.urlopen(target, timeout=2) as response:
                     self.send_body(response.status, response.headers.get("Content-Type", "application/json"), response.read())
             except urllib.error.HTTPError as error:
                 self.send_body(error.code, error.headers.get("Content-Type", "application/json"), error.read())
