@@ -50,7 +50,7 @@
 
   <section>
     <h2>2. Higgs Realtime</h2>
-    <p class="sub">Sessions end automatically after 5 minutes. Spoken game goals go through the local typed scheduler; Minecraft actions remain unavailable until a game adapter is connected.</p>
+    <p class="sub">Sessions end automatically after 5 minutes. Spoken game goals go through the local typed scheduler and connected Minecraft adapter.</p>
     <p id="rtReminder" class="sub">Press Start to connect the microphone and begin a short test.</p>
     <div class="row">
       <label for="vadThreshold" class="sub">Voice detection threshold</label>
@@ -60,6 +60,7 @@
     <p id="vadHelp" class="sub">Lower values catch quieter speech; higher values reject more game noise. Tune after checking your microphone level.</p>
     <div class="overlay" role="region" aria-label="Companion status">
       <div><strong>Game adapter</strong><span id="adapterState" role="status" aria-live="polite" aria-atomic="true">checking…</span></div>
+      <div><strong>Game observation</strong><span id="observationState" role="status" aria-live="polite" aria-atomic="true">waiting</span></div>
       <div><strong>Current goal</strong><span id="currentGoal" role="status" aria-live="polite" aria-atomic="true">none</span></div>
       <div><strong>Speech</strong><span id="speechState" role="status" aria-live="polite" aria-atomic="true">waiting</span></div>
       <div><strong>Last action event</strong><span id="actionState" role="status" aria-live="polite" aria-atomic="true">waiting</span></div>
@@ -106,8 +107,16 @@ for (const sel of [$("ttsVoice"), $("avVoice")]) sel.innerHTML = VOICES.map(v =>
 function setStatus(el, text, kind = "") { el.textContent = text; el.className = "status " + kind; }
 function setLiveText(el, text) { if (el.textContent !== text) el.textContent = text; }
 function formatGoal(goal) { return goal ? `${goal.kind} · ${goal.id}` : "none"; }
+function formatObservation(observation, error) {
+  if (error) return `unavailable · ${error}`;
+  if (!observation) return "not available";
+  const position = value => value?.position ? value.position.map(part => Number(part).toFixed(1)).join(", ") : "unknown position";
+  const inventory = Object.entries(observation.inventory || {}).map(([name, count]) => `${name} ×${count}`).join(", ") || "empty inventory";
+  return `bot ${position(observation.agent)} · player ${position(observation.player)} · ${inventory}`;
+}
 function renderSchedulerStatus(state) {
   setLiveText($("adapterState"), state.ready ? "connected" : "not connected");
+  setLiveText($("observationState"), formatObservation(state.observation, state.observationError));
   setLiveText($("currentGoal"), formatGoal(state.currentGoal));
   const actionEvent = [...(state.events || [])].reverse().find(event => event.type.startsWith("action."));
   setLiveText($("actionState"), actionEvent

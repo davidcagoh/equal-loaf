@@ -96,6 +96,7 @@ test('exposes readiness, active goals, and timestamped lifecycle events for the 
   const gateway = createGoalGateway({
     port: 0,
     execute: async () => await new Promise((resolve) => { finish = resolve; }),
+    observe: async () => ({ timestamp: 123, game: 'minecraft', agent: { position: [1, 2, 3] } }),
   });
   await new Promise<void>((resolve) => gateway.server.once('listening', resolve));
   const address = gateway.server.address();
@@ -110,6 +111,7 @@ test('exposes readiness, active goals, and timestamped lifecycle events for the 
       currentGoal: null,
       queuedGoals: [],
       events: [],
+      observation: { timestamp: 123, game: 'minecraft', agent: { position: [1, 2, 3] } },
     });
 
     const accepted = await fetch(`${base}/goals`, {

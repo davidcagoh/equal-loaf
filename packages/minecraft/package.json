@@ -1,0 +1,17 @@
+{
+  "name": "@boson/minecraft-adapter",
+  "private": true,
+  "type": "module",
+  "engines": {
+    "node": ">=22"
+  },
+  "scripts": {
+    "test": "node --experimental-strip-types --test src/*.test.ts",
+    "start": "node --experimental-strip-types ../../packages/voice/src/server.ts",
+    "demo-player": "node --experimental-strip-types src/demo-player.ts"
+  },
+  "dependencies": {
+    "mineflayer": "4.39.0",
+    "mineflayer-pathfinder": "2.4.5"
+  }
+}

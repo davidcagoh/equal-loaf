@@ -1,6 +1,6 @@
 # Boson API demo
 
-This collaborator-provided local demo exercises Boson Realtime, TTS, and Avatar APIs. Realtime can submit whitelisted Minecraft goals to the typed Beads scheduler. The goal gateway fails closed while no Minecraft adapter is connected. The Realtime panel shows adapter readiness, speech, the current goal, and recent action outcomes, with a local stop control. Keep credentials outside Git; root `.env`, `.api`, `BOSON_API_KEY`, and `BOSON_API_KEY_100` are supported.
+This collaborator-provided local demo exercises Boson Realtime, TTS, and Avatar APIs. Realtime can submit whitelisted Minecraft goals to the typed scheduler. The gateway connects a loopback Mineflayer adapter and fails closed when Minecraft is unavailable. The Realtime panel shows adapter readiness, observed player/bot positions and inventory, speech, the current goal, and recent action outcomes, with a local stop control. Keep credentials outside Git; root `.env`, `.api`, `BOSON_API_KEY`, and `BOSON_API_KEY_100` are supported.
 
 ## Endpoints and workflow fit
 
@@ -14,16 +14,18 @@ The broader workflow is **approved transcript → voice → timing/alignment →
 
 ## Requirements and local run
 
-- Python 3.10+, Node.js 22.6+ (tested with 24.12), and a Boson API key with access to the requested endpoints.
+- Python 3.10+, Node.js 22.6+ (tested with 24.12), Java 21+, and a Boson API key with access to the requested endpoints.
+- Install the pinned Mineflayer adapter dependencies with `npm ci --prefix packages/minecraft`. Start the local world in one terminal with `bash scripts/start-minecraft-world.sh`; the configured server runs only on loopback in offline mode.
+- A Minecraft account is not required for the companion. To provide an account-free moving target, run `npm --prefix packages/minecraft run demo-player` in a second terminal and set `BOSON_MC_PLAYER=DemoPlayer` when starting the companion.
 - Put the key in the ignored project-root `.env` as `BOSON_API_KEY_100`, or set `BOSON_API_KEY` in the environment. Never commit or paste the key.
-- Grant microphone permission only when you are ready to send live audio to Boson. The current session has verified text-triggered Realtime audio output; it has not used microphone input.
+- Browser microphone audio is sent directly to Boson while the Realtime session is active. Grant browser access only when ready; stop the session when finished.
 - Start from the project root:
 
   ```sh
   bash scripts/start-companion-demo.sh
   ```
 
-- Open `http://127.0.0.1:8000`. The browser connects to Boson for Realtime; it may request microphone access. Server VAD threshold defaults to 0.70 and can be tuned in the UI (the provider default is now 0.85). TTS and Avatar buttons submit paid API requests. Local request limits are 10 TTS, 5 Realtime-key, and 3 Avatar requests per hour. Realtime auto-disconnects after five minutes.
+- Open `http://127.0.0.1:8000`. The browser connects to Boson for Realtime and requests microphone access. Server VAD threshold defaults to 0.70 and can be tuned in the UI (the provider default is now 0.85). TTS and Avatar buttons submit paid API requests. Local request limits are 10 TTS, 5 Realtime-key, and 3 Avatar requests per hour. Realtime auto-disconnects after five minutes.
 
 ## Cost and authorization
 

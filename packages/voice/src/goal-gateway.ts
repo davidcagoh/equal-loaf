@@ -2,7 +2,7 @@ import { createServer, type IncomingMessage, type Server, type ServerResponse } 
 import { randomUUID } from 'node:crypto';
 import { GoalScheduler } from '../../scheduler/src/index.ts';
 import { formatActionOutcome, formatPendingOutcome } from './action-outcome.ts';
-import { parseGoalProposal, type CompanionEvent, type Goal, type GoalResult } from '../../contracts/src/index.ts';
+import { parseGoalProposal, type CompanionEvent, type Goal, type GoalResult, type Observation } from '../../contracts/src/index.ts';
 
 const allowedKinds = ['follow', 'stop', 'approach', 'gather', 'give', 'defend', 'retreat', 'report'] as const;
 const maxBodyBytes = 16 * 1024;
@@ -13,6 +13,7 @@ export interface GoalGatewayOptions {
   port?: number;
   onEvent?: (event: unknown) => void;
   isReady?: () => boolean;
+  observe?: () => Promise<Observation>;
 }
 
 async function readJson(request: IncomingMessage): Promise<Record<string, unknown>> {
@@ -70,13 +71,22 @@ export function createGoalGateway(options: GoalGatewayOptions): { server: Server
       return;
     }
     if (request.method === 'GET' && request.url === '/status') {
-      respond(response, 200, {
+      const status: Record<string, unknown> = {
         ready: isReady(),
         objective: scheduler.objective ?? null,
         currentGoal: scheduler.currentGoal ?? null,
         queuedGoals: scheduler.queuedGoals,
         events,
-      });
+      };
+      if (options.observe) {
+        try {
+          status.observation = isReady() ? await options.observe() : null;
+        } catch (error) {
+          status.observation = null;
+          status.observationError = error instanceof Error ? error.message : 'Minecraft observation failed.';
+        }
+      }
+      respond(response, 200, status);
       return;
     }
     if (request.method === 'GET' && request.url?.startsWith('/results/')) {
