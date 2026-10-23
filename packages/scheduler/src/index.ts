@@ -39,7 +39,7 @@ export class GoalScheduler {
   private objectiveValue?: string;
   private stopped = false;
   private stopInProgress = false;
-  private stopTask?: Promise<void>;
+  private stopTask?: Promise<GoalResult>;
   private readonly timeoutMs: number;
   private readonly recovery?: SchedulerOptions['recovery'];
   private readonly execute: Executor;
@@ -91,21 +91,20 @@ export class GoalScheduler {
     this.pump();
   }
 
-  async stop(id = `stop-${Date.now()}`): Promise<void> {
+  async stop(id = `stop-${Date.now()}`): Promise<GoalResult> {
     if (this.stopTask) {
-      await this.stopTask;
-      return;
+      return await this.stopTask;
     }
     const task = this.performStop(id);
     this.stopTask = task;
     try {
-      await task;
+      return await task;
     } finally {
       if (this.stopTask === task) this.stopTask = undefined;
     }
   }
 
-  private async performStop(id: string): Promise<void> {
+  private async performStop(id: string): Promise<GoalResult> {
     this.stopInProgress = true;
     this.stopped = true;
     this.queue = [];
@@ -115,8 +114,9 @@ export class GoalScheduler {
     const controller = new AbortController();
     this.publish({ type: 'action.started', goalId: id });
     let stopTimer: ReturnType<typeof setTimeout> | undefined;
+    let stopResult: GoalResult = { status: 'failed', detail: 'Stop action did not complete' };
     try {
-      const result = await Promise.race([
+      stopResult = await Promise.race([
         this.execute(stopGoal, controller.signal),
         new Promise<GoalResult>((resolve) => { stopTimer = setTimeout(() => {
           controller.abort('Stop action timed out');
@@ -124,12 +124,13 @@ export class GoalScheduler {
         }, this.timeoutMs); }),
       ]);
       if (stopTimer) clearTimeout(stopTimer);
-      if (result.status === 'completed') this.publish({ type: 'action.completed', goalId: id, detail: result.detail });
-      else if (result.status === 'cancelled') this.publish({ type: 'action.cancelled', goalId: id, reason: result.detail });
-      else this.publish({ type: 'action.failed', goalId: id, reason: result.detail ?? `Stop ${result.status}` });
+      if (stopResult.status === 'completed') this.publish({ type: 'action.completed', goalId: id, detail: stopResult.detail });
+      else if (stopResult.status === 'cancelled') this.publish({ type: 'action.cancelled', goalId: id, reason: stopResult.detail });
+      else this.publish({ type: 'action.failed', goalId: id, reason: stopResult.detail ?? `Stop ${stopResult.status}` });
     } catch (error) {
       if (stopTimer) clearTimeout(stopTimer);
-      this.publish({ type: 'action.failed', goalId: id, reason: error instanceof Error ? error.message : String(error) });
+      stopResult = { status: 'failed', detail: error instanceof Error ? error.message : String(error) };
+      this.publish({ type: 'action.failed', goalId: id, reason: stopResult.detail! });
     } finally {
       this.stopInProgress = false;
       if (this.queue.length > 0) {
@@ -137,6 +138,7 @@ export class GoalScheduler {
         this.pump();
       }
     }
+    return stopResult;
   }
 
   async cancel(goalId: string, reason = 'Cancelled by request'): Promise<boolean> {

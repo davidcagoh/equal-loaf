@@ -49,7 +49,8 @@ test('stop overrides work, clears queued goals, and acknowledges only confirmed 
   await scheduler.submit(goal('long'));
   await scheduler.submit(goal('queued', 'gather', 'background'));
   assert.equal(scheduler.queuedGoals.length, 1);
-  await scheduler.stop();
+  const stopResult = await scheduler.stop();
+  assert.equal(stopResult.status, 'cancelled');
   finish({ status: 'completed' });
   await scheduler.drain();
   assert.equal(events.includes('action.cancelled:long'), true);
