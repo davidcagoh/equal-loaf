@@ -381,7 +381,7 @@ export async function startPttAudioHarness({ port = 0, host = '127.0.0.1', provi
     }
 
     if (pathname === '/native/story/residents' && request.method === 'GET') {
-      if (!isSameOriginPttRequest(request, viewerOrigins)) { json(response, 403, { available: false }); return; }
+      if (!isLocalViewerRequest(request, viewerOrigins, allowedHosts)) { json(response, 403, { available: false }); return; }
       json(response, 200, { residents: STORY_RESIDENTS.map(({ id, name, role, voice }) => ({ residentId: id, name, role, voice })) });
       return;
     }

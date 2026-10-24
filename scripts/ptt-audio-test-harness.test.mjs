@@ -263,7 +263,8 @@ test('Equal Loaf story tester lists three isolated residents and is safe while t
   assert.doesNotMatch(html, /The garden is growing well today|east beds need watering/);
 
   const headers = { Origin: new URL(harness.url).origin, 'Sec-Fetch-Site': 'same-origin' };
-  const residentsResponse = await fetch(new URL('/native/story/residents', harness.url), { headers });
+  const browserHeaders = { 'Sec-Fetch-Site': 'same-origin' };
+  const residentsResponse = await fetch(new URL('/native/story/residents', harness.url), { headers: browserHeaders });
   assert.equal(residentsResponse.status, 200);
   const residents = await residentsResponse.json();
   assert.deepEqual(residents.residents.map(({ residentId, name, voice }) => ({ residentId, name, voice })), [
@@ -271,6 +272,10 @@ test('Equal Loaf story tester lists three isolated residents and is safe while t
     { residentId: 'tobin', name: 'James', voice: 'oliver' },
     { residentId: 'pip', name: 'Thomas', voice: 'jake' },
   ]);
+  const crossSiteResidents = await fetch(new URL('/native/story/residents', harness.url), {
+    headers: { Origin: 'http://example.invalid', 'Sec-Fetch-Site': 'cross-site' },
+  });
+  assert.equal(crossSiteResidents.status, 403);
   const invalid = await fetch(new URL('/native/story/session/start', harness.url), {
     method: 'POST', headers: { ...headers, 'Content-Type': 'application/json' },
     body: JSON.stringify({ residentId: 'unknown' }),
