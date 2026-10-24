@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
-import { NativeResidentAudioClient } from './viewer-ptt-native.js';
+import { NativeResidentAudioClient, nativeHearingOptionsFromSearch } from './viewer-ptt-native.js';
 import { encodePcm16 } from './audio/native-realtime-core.js';
 
 class FakeTarget {
@@ -107,6 +107,12 @@ function setupClient(options: Record<string, any> & { enableInputTranscription?:
 }
 
 async function settle() { await new Promise((resolve) => setTimeout(resolve, 0)); }
+
+test('native player hearing requires explicit opt-in on the native resident page', () => {
+  assert.deepEqual(nativeHearingOptionsFromSearch('?nativeResidentAudio=1'), { enableInputTranscription: false });
+  assert.deepEqual(nativeHearingOptionsFromSearch('?nativePlayerHearing=1'), { enableInputTranscription: false });
+  assert.deepEqual(nativeHearingOptionsFromSearch('?nativeResidentAudio=1&nativePlayerHearing=1'), { enableInputTranscription: true });
+});
 
 test('actual main-world client opens mic only on held gesture and keeps resident Realtime sockets isolated', async () => {
   FakeSocket.instances = []; FakeAudioContext.instances = [];

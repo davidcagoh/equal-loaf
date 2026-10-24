@@ -791,4 +791,12 @@ export function startNativeResidentAudio(options) {
   return client;
 }
 
-if (typeof document !== 'undefined' && typeof window !== 'undefined') startNativeResidentAudio();
+export function nativeHearingOptionsFromSearch(search) {
+  const parameters = new URLSearchParams(search);
+  return { enableInputTranscription: parameters.get('nativeResidentAudio') === '1'
+    && parameters.get('nativePlayerHearing') === '1' };
+}
+
+if (typeof document !== 'undefined' && typeof window !== 'undefined') {
+  startNativeResidentAudio(nativeHearingOptionsFromSearch(window.location.search));
+}
