@@ -16,7 +16,7 @@ const html = `<!doctype html>
   <h1>Boson browser audio acceptance</h1>
   <p>This page runs the production viewer audio client and local browser SpeechSynthesis. No Minecraft server, microphone, or paid service is used.</p>
   <p><button id="enable">Enable audio</button><button id="position">Set explorer position (0, 64, 0)</button></p>
-  <p><button id="near">Send nearby Mira dialogue</button><button id="far">Send distant Tobin dialogue</button></p>
+  <p><button id="near">Send nearby Anna dialogue</button><button id="far">Send distant James dialogue</button></p>
   <p><button id="pause">Pause, then send a queued line</button><button id="resume">Resume</button><button id="stop">Stop</button></p>
   <h2>Browser evidence</h2><pre id="evidence">Starting event stream…</pre>
 </main>
@@ -54,9 +54,9 @@ const html = `<!doctype html>
   };
   document.querySelector('#enable').onclick = () => document.querySelector('#boson-enable')?.click();
   document.querySelector('#position').onclick = () => window.setExplorer();
-  document.querySelector('#near').onclick = () => window.sendDialogue('mira', 'Mira', 'Good morning, the bakery is open.', {x: 0, y: 64, z: 0});
-  document.querySelector('#far').onclick = () => window.sendDialogue('tobin', 'Tobin', 'I am tending the fields on the far side of the village.', {x: 48, y: 64, z: 0});
-  document.querySelector('#pause').onclick = () => { document.querySelector('#boson-pause')?.click(); window.sendDialogue('mira', 'Mira', 'I will wait here while you pause.', {x: 2, y: 64, z: 0}); };
+  document.querySelector('#near').onclick = () => window.sendDialogue('mira', 'Anna', 'Good morning, the bakery is open.', {x: 0, y: 64, z: 0});
+  document.querySelector('#far').onclick = () => window.sendDialogue('tobin', 'James', 'I am tending the fields on the far side of the village.', {x: 48, y: 64, z: 0});
+  document.querySelector('#pause').onclick = () => { document.querySelector('#boson-pause')?.click(); window.sendDialogue('mira', 'Anna', 'I will wait here while you pause.', {x: 2, y: 64, z: 0}); };
   document.querySelector('#resume').onclick = () => document.querySelector('#boson-pause')?.click();
   document.querySelector('#stop').onclick = () => document.querySelector('#boson-stop')?.click();
   window.addEventListener('load', render);

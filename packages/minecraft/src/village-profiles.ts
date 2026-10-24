@@ -23,10 +23,13 @@ export interface DialogueTurn {
 
 export interface MysteryTurn extends DialogueTurn { clueId: string }
 
+/** Stable simulation IDs stay private; these are the ordinary names shown to the player. */
+export const RESIDENT_DISPLAY_NAMES = Object.freeze({ mira: 'Anna', tobin: 'James', pip: 'Thomas' });
+
 export const villageProfiles: readonly VillagerProfile[] = [
   {
     id: 'mira',
-    username: 'MiraGardener',
+    username: RESIDENT_DISPLAY_NAMES.mira,
     role: 'gardener',
     goal: 'protect the seedlings and keep the village fed',
     knownFactIds: ['silent-bell', 'mira-sighting', 'seedlings-safe'],
@@ -39,7 +42,7 @@ export const villageProfiles: readonly VillagerProfile[] = [
   },
   {
     id: 'tobin',
-    username: 'TobinCart',
+    username: RESIDENT_DISPLAY_NAMES.tobin,
     role: 'cartographer',
     goal: 'keep route records reliable and prevent panic',
     knownFactIds: ['silent-bell', 'flour-ledger', 'route-mark'],
@@ -52,7 +55,7 @@ export const villageProfiles: readonly VillagerProfile[] = [
   },
   {
     id: 'pip',
-    username: 'PipBaker',
+    username: RESIDENT_DISPLAY_NAMES.pip,
     role: 'baker',
     goal: 'keep the bakery running and protect its reputation',
     knownFactIds: ['silent-bell', 'flour-ledger', 'pip-denial', 'pip-contradiction'],
@@ -67,11 +70,11 @@ export const villageProfiles: readonly VillagerProfile[] = [
 
 /** Authored turn order keeps conversations reproducible and lets residents refer to shared events. */
 export const villageDialogue: readonly DialogueTurn[] = [
-  { speakerId: 'mira', listenerId: 'pip', stopId: 'seed-shed', line: 'Pip, the west wheat is ready after last night’s rain.' },
+  { speakerId: 'mira', listenerId: 'pip', stopId: 'seed-shed', line: `${RESIDENT_DISPLAY_NAMES.pip}, the west wheat is ready after last night’s rain.` },
   { speakerId: 'pip', listenerId: 'mira', stopId: 'bakery-hearth', line: 'Then I can bake the extra loaf you promised the seed keepers.' },
-  { speakerId: 'tobin', listenerId: 'mira', stopId: 'river-gate', line: 'Mira, I marked the flooded river bend on the map board.' },
+  { speakerId: 'tobin', listenerId: 'mira', stopId: 'river-gate', line: `${RESIDENT_DISPLAY_NAMES.mira}, I marked the flooded river bend on the map board.` },
   { speakerId: 'mira', listenerId: 'tobin', stopId: 'west-garden', line: 'I saw the water too; I’ll move the seedlings uphill before dusk.' },
-  { speakerId: 'pip', listenerId: 'tobin', stopId: 'grain-store', line: 'Tobin, your dry trail map brought the grain cart through safely.' },
+  { speakerId: 'pip', listenerId: 'tobin', stopId: 'grain-store', line: `${RESIDENT_DISPLAY_NAMES.tobin}, your dry trail map brought the grain cart through safely.` },
   { speakerId: 'tobin', listenerId: 'pip', stopId: 'map-board', line: 'Good. I’ll add your bakery as the next stop before the bridge.' },
   { speakerId: 'mira', listenerId: 'pip', stopId: 'market-well', line: 'The new seedlings are safe uphill; I saved a basket of wheat for your next batch.' },
   { speakerId: 'tobin', listenerId: 'mira', stopId: 'market-well', line: 'I added that higher garden path to the map after seeing your seedlings there.' },

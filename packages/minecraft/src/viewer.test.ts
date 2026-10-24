@@ -81,12 +81,13 @@ test('renders scripted village dialogue actors with the native villager model in
   assert.match(browserEntrySource, /new OrbitControls\(viewer\.camera, renderer\.domElement\)/);
   assert.ok(browserBundle.includes('OrbitControls'));
   assert.doesNotMatch(browserBundle, /new THREE\.OrbitControls/);
-  assert.match(worldViewSource, /\['MiraGardener', 'TobinCart', 'PipBaker'\]\.includes\(e\.username\) \? 'villager' : e\.name/);
+  assert.match(worldViewSource, /\['Anna', 'James', 'Thomas'\]\.includes\(e\.username\) \? 'villager' : e\.name/);
+  assert.equal((worldViewSource.match(/name: \['Anna', 'James', 'Thomas'\]\.includes\(e\.username\) \? 'villager' : e\.name/g) ?? []).length, 2);
   assert.equal(villagerModels.villager.textures.default, 'textures/entity/villager/type/plains');
   assert.ok(browserBundle.includes('"default":"textures/entity/villager/type/plains"'));
 });
 
-test('production postinstall safely skips the viewer patch when webpack is omitted', () => {
+test('production postinstall reuses verified assets or fails closed when webpack is omitted', () => {
   const scriptPath = join(dirname(new URL(import.meta.url).pathname), '..', 'scripts', 'apply-prismarine-viewer-fix.cjs');
   const prismarineRoot = dirname(require.resolve('prismarine-viewer'));
   const result = spawnSync(process.execPath, [scriptPath], {
@@ -94,8 +95,12 @@ test('production postinstall safely skips the viewer patch when webpack is omitt
     env: { ...process.env, BOSON_WEBPACK_BIN: join(prismarineRoot, '__webpack_not_installed__') },
   });
 
-  assert.equal(result.status, 0, result.stderr);
-  assert.match(result.stderr, /Skipping Prismarine Viewer patch: webpack is unavailable/);
+  if (result.status === 0) {
+    assert.equal(result.stderr, '');
+    return;
+  }
+  assert.equal(result.status, 1);
+  assert.match(result.stderr, /Cannot verify or build the Boson viewer patch: webpack is unavailable/);
 });
 
 test('maps greater explorer distance to lower speech volume and validates dialogue events', () => {
@@ -139,13 +144,13 @@ test('serves subtitles client and relays validated dialogue over same-origin SSE
     activeReader = stream.body?.getReader();
     assert.ok(activeReader);
     await activeReader.read();
-    const event = { type: 'village.dialogue', speakerId: 'mira', speakerName: 'Mira', line: 'Good morning.', position: { x: 0, y: 64, z: 0 }, timestamp: 123 };
+    const event = { type: 'village.dialogue', speakerId: 'mira', speakerName: 'Anna', line: 'Good morning.', position: { x: 0, y: 64, z: 0 }, timestamp: 123 };
     const response = await fetch(`http://127.0.0.1:${port}/boson-dialogue`, {
       method: 'POST', headers: { origin: `http://127.0.0.1:${port}`, 'content-type': 'application/json' }, body: JSON.stringify(event),
     });
     assert.equal(response.status, 202);
     const message = await activeReader.read();
-    assert.match(new TextDecoder().decode(message.value), /event: dialogue[\s\S]*Mira/);
+    assert.match(new TextDecoder().decode(message.value), /event: dialogue[\s\S]*Anna/);
     const invalid = await fetch(`http://127.0.0.1:${port}/boson-dialogue`, {
       method: 'POST', headers: { origin: `http://127.0.0.1:${port}`, 'content-type': 'application/json' }, body: '{}',
     });

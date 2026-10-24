@@ -208,9 +208,9 @@ node --experimental-strip-types scripts/run-village-with-dialogue-relay.mjs >"$V
 village_pid=$!
 child_pids+=("$village_pid")
 wait_for_log "$village_pid" "$VILLAGE_LOG" 'Village simulator active; forwarding dialogue' "Village simulator and dialogue relay ready" 30
-wait_for_log "$village_pid" "$VILLAGE_LOG" 'MiraGardener .* joined at' "MiraGardener joined" 60
-wait_for_log "$village_pid" "$VILLAGE_LOG" 'TobinCart .* joined at' "TobinCart joined" 60
-wait_for_log "$village_pid" "$VILLAGE_LOG" 'PipBaker .* joined at' "PipBaker joined" 60
+wait_for_log "$village_pid" "$VILLAGE_LOG" 'Anna .* joined at' "Anna joined" 60
+wait_for_log "$village_pid" "$VILLAGE_LOG" 'James .* joined at' "James joined" 60
+wait_for_log "$village_pid" "$VILLAGE_LOG" 'Thomas .* joined at' "Thomas joined" 60
 wait_for_log "$village_pid" "$VILLAGE_LOG" 'Relayed village dialogue event.' "First village dialogue event reached the viewer" 180
 
 echo

@@ -1,4 +1,4 @@
-import { villageProfiles } from './village-profiles.ts';
+import { RESIDENT_DISPLAY_NAMES, villageProfiles } from './village-profiles.ts';
 import { PLAYER_INTENTS, VILLAGE_TOPICS } from './village-vocabulary.js';
 
 export { PLAYER_INTENTS, VILLAGE_TOPICS };
@@ -91,12 +91,12 @@ export interface SemanticResponse {
 
 export const VILLAGE_FACTS = Object.freeze({
   'silent-bell': { topic: 'bell', text: 'Rowan’s usual dawn bell did not ring.' },
-  'mira-sighting': { topic: 'garden', text: 'Mira saw Pip return by the garden path before dawn.' },
-  'seedlings-safe': { topic: 'garden', text: 'Mira moved the seedlings uphill, where they are safe.' },
+  'mira-sighting': { topic: 'garden', text: `${RESIDENT_DISPLAY_NAMES.mira} saw ${RESIDENT_DISPLAY_NAMES.pip} return by the garden path before dawn.` },
+  'seedlings-safe': { topic: 'garden', text: `${RESIDENT_DISPLAY_NAMES.mira} moved the seedlings uphill, where they are safe.` },
   'flour-ledger': { topic: 'flour', text: 'The flour ledger is short by two sacks.' },
-  'route-mark': { topic: 'route', text: 'Tobin’s map marks a flour cart route by the bell-house path, but not its driver.' },
-  'pip-denial': { topic: 'bakery', text: 'Pip says he stayed in the bakery all night and the ovens were cold until morning.' },
-  'pip-contradiction': { topic: 'bakery', text: 'Pip later says he returned to the bakery after dawn and relit the hearth.' },
+  'route-mark': { topic: 'route', text: `${RESIDENT_DISPLAY_NAMES.tobin}’s map marks a flour cart route by the bell-house path, but not its driver.` },
+  'pip-denial': { topic: 'bakery', text: `${RESIDENT_DISPLAY_NAMES.pip} says he stayed in the bakery all night and the ovens were cold until morning.` },
+  'pip-contradiction': { topic: 'bakery', text: `${RESIDENT_DISPLAY_NAMES.pip} later says he returned to the bakery after dawn and relit the hearth.` },
 } as const satisfies Record<string, { topic: VillageTopic; text: string }>);
 
 type FactId = keyof typeof VILLAGE_FACTS;
@@ -164,7 +164,7 @@ const AUTHORED_BEATS: readonly AuthoredBeat[] = [
 ];
 
 const AUTHORED_LINES = Object.freeze({
-  'mira-sighting-disclosure': 'I saw Pip come back along the garden path before dawn. I was afraid to say so.',
+  'mira-sighting-disclosure': `I saw ${RESIDENT_DISPLAY_NAMES.pip} come back along the garden path before dawn. I was afraid to say so.`,
   'mira-guarded-garden-reply': 'The seedlings are safer uphill. I have work to finish before we talk more.',
   'mira-garden-help-reply': 'I could use help checking the seedlings. Stay on the garden path, please.',
   'tobin-guarded-route-reply': 'The map shows the route. It does not tell me who drove the cart.',

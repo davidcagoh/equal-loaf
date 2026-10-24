@@ -17,7 +17,7 @@ if (viewerPackage.version !== '1.33.0') {
   throw new Error(`Expected prismarine-viewer@1.33.0, found ${viewerPackage.version}`)
 }
 
-const PATCH_REVISION = 'boson-first-person-controls-v3'
+const PATCH_REVISION = 'boson-first-person-controls-resident-models-v4'
 const markerPath = path.join(viewerRoot, '.boson-patch-state.json')
 const patchHash = crypto.createHash('sha256')
   .update(PATCH_REVISION)
@@ -32,6 +32,7 @@ const patchAssetsComplete = () => {
     const page = fs.readFileSync(path.join(viewerRoot, 'public', 'index.html'), 'utf8')
     const bundle = fs.readFileSync(path.join(viewerRoot, 'public', 'index.js'), 'utf8')
     const worker = fs.readFileSync(path.join(viewerRoot, 'public', 'worker.js'), 'utf8')
+    const worldView = fs.readFileSync(path.join(viewerRoot, 'viewer', 'lib', 'worldView.js'), 'utf8')
     return viewerSource.includes('const safeDistance = FIRST_PERSON_DISTANCE')
       && viewerSource.includes('localLookPose')
       && !viewerSource.includes('const currentCameraDistance = 3.5')
@@ -39,6 +40,7 @@ const patchAssetsComplete = () => {
       && mineflayerSource.includes("socket.on('boson:control-release'")
       && page.includes('Click the world to play · WASD move · mouse look')
       && bundle.includes('bosonLookPose')
+      && worldView.includes("['Anna', 'James', 'Thomas'].includes(e.username) ? 'villager' : e.name")
       && !/if\([\w$]+\.position\.y<0\)continue;?/.test(worker)
   } catch {
     return false
@@ -72,13 +74,22 @@ function replaceExpected (relativePath, before, after, expectedCount = 1) {
   fs.writeFileSync(filePath, updated)
 }
 
-function replaceAnyExpected (relativePath, alternatives, after) {
+function replaceAnyExpected (relativePath, alternatives, after, expectedCount = 1) {
   const filePath = path.join(viewerRoot, relativePath)
   const source = fs.readFileSync(filePath, 'utf8')
-  if (source.includes(after)) return
-  const before = alternatives.find((candidate) => source.includes(candidate))
-  if (!before) throw new Error(`Could not find expected Prismarine Viewer code in ${relativePath}`)
-  fs.writeFileSync(filePath, source.replace(before, after))
+  const afterCount = source.split(after).length - 1
+  if (afterCount >= expectedCount) return
+  let remaining = expectedCount - afterCount
+  let updated = source
+  for (const before of alternatives) {
+    updated = updated.replaceAll(before, () => {
+      if (remaining === 0) return before
+      remaining -= 1
+      return after
+    })
+  }
+  if (remaining !== 0) throw new Error(`Found too few matching Prismarine Viewer sections in ${relativePath}`)
+  fs.writeFileSync(filePath, updated)
 }
 
 function replaceSection (relativePath, startMarker, endMarker, replacement, completionMarker) {
@@ -173,11 +184,15 @@ replaceExpected(
   "    socket.on('disconnect', () => {\n      bot.removeListener('move', botPosition)",
   "    socket.on('boson:controls', (packet) => bot.viewer.emit('boson:controls', socket.id, packet))\n    socket.on('boson:control-release', () => bot.viewer.emit('boson:control-release', socket.id))\n    socket.on('disconnect', () => {\n      bot.viewer.emit('boson:control-disconnect', socket.id)\n      bot.removeListener('move', botPosition)"
 )
-replaceExpected(
+replaceAnyExpected(
   'viewer/lib/worldView.js',
-  'name: e.name, pos: e.position, width: e.width, height: e.height, username: e.username',
-  "name: ['MiraGardener', 'TobinCart', 'PipBaker'].includes(e.username) ? 'villager' : e.name, pos: e.position, width: e.width, height: e.height, username: e.username",
-  2
+  [
+    'name: e.name, pos: e.position, width: e.width, height: e.height, username: e.username',
+    "name: ['MiraGardener', 'TobinCart', 'PipBaker'].includes(e.username) ? 'villager' : e.name, pos: e.position, width: e.width, height: e.height, username: e.username",
+    'name: bosonEntityModelName(e.name, e.username), pos: e.position, width: e.width, height: e.height, username: e.username',
+  ],
+  "name: ['Anna', 'James', 'Thomas'].includes(e.username) ? 'villager' : e.name, pos: e.position, width: e.width, height: e.height, username: e.username",
+  2,
 )
 replaceExpected(
   'viewer/lib/entity/entities.json',

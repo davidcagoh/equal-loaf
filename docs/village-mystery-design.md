@@ -10,7 +10,7 @@ The murder is entirely off-screen and non-graphic. No resident attacks the playe
 
 ## What exists today
 
-- `packages/minecraft/src/village-profiles.ts` defines three simulated residents—Mira the gardener, Tobin the cartographer, and Pip the baker—with three waypoint stops each.
+- `packages/minecraft/src/village-profiles.ts` defines three simulated residents—Anna the gardener, James the cartographer, and Thomas the baker—with three waypoint stops each.
 - `packages/minecraft/src/village.ts` currently advances one authored dialogue turn at a time. It moves that speaker and listener, emits a chat/dialogue event, then waits 18–30 seconds. Routine movement and dialogue are therefore coupled, with long quiet gaps.
 - `packages/minecraft/src/viewer-audio.js` presents local subtitles and speech and adjusts volume using the explorer’s distance from a dialogue event. No remote voice service is needed for this path.
 - `docs/third-person-camera-research.md` describes a proposed camera that follows the explorer’s yaw and pitch. The camera work is separate from this narrative proposal.
@@ -21,7 +21,7 @@ These are repository facts. The story, schedule, suspicion behavior, and prompts
 
 The village bell keeper, Rowan, was found dead in the bell house before dawn. The scene is not shown; the bell simply did not ring, and the villagers are now keeping to familiar routes in pairs or within sight of home. Nobody knows the newcomer, so residents watch from a respectful distance and are reluctant to speak plainly.
 
-**Authored answer:** Pip killed Rowan during a private argument after Rowan discovered that Pip had been diverting a portion of the winter flour stores. The act happened off-screen. Pip is remorseful and frightened, but still hides the truth. The other residents have reasons to look suspicious and each holds one useful piece of the timeline. The player’s arrival is coincidental.
+**Authored answer:** Thomas killed Rowan during a private argument after Rowan discovered that Thomas had been diverting a portion of the winter flour stores. The act happened off-screen. Thomas is remorseful and frightened, but still hides the truth. The other residents have reasons to look suspicious and each holds one useful piece of the timeline. The player’s arrival is coincidental.
 
 The crime is a fixed story fact, not something an LLM may change. The MVP does not need to simulate Rowan, a body, a weapon, or the act itself. A closed bell-house door, a stopped bell schedule, dialogue, and small environmental clues can carry the premise.
 
@@ -29,17 +29,17 @@ The crime is a fixed story fact, not something an LLM may change. The MVP does n
 
 | Resident | Everyday life | What they want | What they conceal / know | How they treat the player |
 |---|---|---|---|---|
-| **Mira, gardener** | Tends the west beds, carries seedlings uphill, checks the well | Keep the village fed and the gardens safe | Saw Pip leave the bell-house path before dawn; initially withholds this because she fears a false accusation | Watches from a garden edge, turns back to work if approached too quickly; speaks more freely near her beds |
-| **Tobin, cartographer** | Updates route notes, checks the river gate, walks between map board and market | Preserve trustworthy records and prevent panic | His map shows the flour cart took an unusual detour; he did not record it immediately | Keeps the map between himself and the player; may invite the player to look from across the board |
-| **Pip, baker** | Tends the hearth, fetches grain, shares bread with neighbors | Protect the bakery and avoid being exposed | Diverted flour and killed Rowan after the argument; denies being at the bell-house | Tries to stay within sight of an exit, watches the player’s hands/approach, and changes subject when the bell or flour is mentioned |
+| **Anna, gardener** | Tends the west beds, carries seedlings uphill, checks the well | Keep the village fed and the gardens safe | Saw Thomas leave the bell-house path before dawn; initially withholds this because she fears a false accusation | Watches from a garden edge, turns back to work if approached too quickly; speaks more freely near her beds |
+| **James, cartographer** | Updates route notes, checks the river gate, walks between map board and market | Preserve trustworthy records and prevent panic | His map shows the flour cart took an unusual detour; he did not record it immediately | Keeps the map between himself and the player; may invite the player to look from across the board |
+| **Thomas, baker** | Tends the hearth, fetches grain, shares bread with neighbors | Protect the bakery and avoid being exposed | Diverted flour and killed Rowan after the argument; denies being at the bell-house | Tries to stay within sight of an exit, watches the player’s hands/approach, and changes subject when the bell or flour is mentioned |
 
 The absent victim Rowan is described only through the missing bell, the closed bell-house, and neighbors’ memories. A later iteration can add residents, but three modeled villagers are enough to test this arc.
 
-Give their voices different rhythms as well as different facts: Mira is practical and plain-spoken; Tobin is precise and qualifies what he knows; Pip is warm and lightly humorous until the bell or flour comes up. Example ambient lines:
+Give their voices different rhythms as well as different facts: Anna is practical and plain-spoken; James is precise and qualifies what he knows; Thomas is warm and lightly humorous until the bell or flour comes up. Example ambient lines:
 
-- **Mira:** “Seedlings don’t wait for a quiet morning. I’ll tell you what I saw when the path is clear.”
-- **Tobin:** “The map records the cart’s route. It does not record who was driving it.”
-- **Pip:** “If the oven’s warm, people ask fewer questions. Funny how that works.”
+- **Anna:** “Seedlings don’t wait for a quiet morning. I’ll tell you what I saw when the path is clear.”
+- **James:** “The map records the cart’s route. It does not record who was driving it.”
+- **Thomas:** “If the oven’s warm, people ask fewer questions. Funny how that works.”
 
 ### Clue progression
 
@@ -47,9 +47,9 @@ Clues are discoverable in any order; dialogue should react to what the player ha
 
 1. **The silent morning bell:** all three residents mention that Rowan’s normal dawn bell did not ring. This establishes the event without a forced exposition scene.
 2. **The flour ledger:** a discrepancy at the bakery suggests someone has been hiding shortages. It points toward motive but does not identify the killer by itself.
-3. **The route mark:** Tobin’s map and a muddy track show a flour cart used the path behind the bell-house that night. This puts more than one person near the scene.
-4. **Mira’s sighting:** after a low-pressure conversation near the garden, Mira recalls seeing Pip return from that path before dawn.
-5. **Pip’s contradiction:** Pip first says the bakery was closed all night, then later mentions having relit the hearth after dawn. The contradiction becomes clear only when paired with the route and sighting.
+3. **The route mark:** James’s map and a muddy track show a flour cart used the path behind the bell-house that night. This puts more than one person near the scene.
+4. **Anna’s sighting:** after a low-pressure conversation near the garden, Anna recalls seeing Thomas return from that path before dawn.
+5. **Thomas’s contradiction:** Thomas first says the bakery was closed all night, then later mentions having relit the hearth after dawn. The contradiction becomes clear only when paired with the route and sighting.
 
 At the final beat, the residents can discuss the gathered facts among themselves. The prototype can end on a conversation that acknowledges the evidence; it need not implement a confession, interrogation system, verdict, or branching ending. Never treat one ambiguous clue as proof.
 

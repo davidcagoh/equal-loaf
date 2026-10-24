@@ -14,7 +14,7 @@ Make the village react to what its residents can observe and remember. Each resi
 
 Represent cognition as local, explicit data, not free-form model state:
 
-- **Goal:** one ordinary near-term purpose, such as Mira protecting the seedlings or Tobin maintaining a reliable route map. Goals explain routine choices; a beat can temporarily suspend one and then expire back to it.
+- **Goal:** one ordinary near-term purpose, such as Anna protecting the seedlings or James maintaining a reliable route map. Goals explain routine choices; a beat can temporarily suspend one and then expire back to it.
 - **Private knowledge:** separate canonical world facts from resident memories of claims. Authored truth stays in a protected story ledger; each resident's knowledge contains only witnessed facts or heard claims, with source, confidence, time, and disclosure conditions. Hearing an allegation records “resident X said Y,” not that Y is verified. Observation events update only residents who were participants or in the specified audibility/range/time window. Hidden story truth is never copied into every resident's state.
 - **Relationship:** small bounded values or named bands per resident pair/player (e.g. unfamiliar, cautious, trusted), changed only by authored local events. No model decides relationship state.
 - **Memory:** a compact set of observed event IDs and completed beat IDs, to prevent repetition and support later callbacks. Keep it in memory for the MVP; save/load is a later question.
@@ -32,11 +32,11 @@ Authored data owns mystery truth, who knows each clue, disclosure thresholds, be
 
 ## First playable scenario: Quiet Bell, one short scene
 
-1. The explorer arrives during the residents' ordinary morning loops. Mira tends the west beds, Tobin checks the map board, and Pip works near the bakery; these routes continue without dialogue being due.
-2. An ambient beat lets the explorer overhear that Rowan's dawn bell did not ring. Later, Tobin and Pip discuss the flour ledger shortage. These facts are public clues, not a forced quest sequence.
-3. The explorer uses the explicit talk control near Mira. Transcription yields a semantic event delivered to every eligible resident in earshot; each records that claim independently. Mira is nearest and gets reply priority. Her response is guarded because the player is unfamiliar; it reflects Mira's seedling-protection goal and does not reveal her private sighting. Residents outside range do not learn the claim.
-4. After a low-pressure exchange near Mira's garden, a locally authored trust/scene condition becomes eligible. Mira chooses to tell the explorer that she saw Pip returning by the garden path before dawn. Her movement to/within the garden and the spoken line share the same intent.
-5. A later overheard bakery exchange gives Pip's timeline contradiction. It is corroboration, not a verdict. The scene ends with residents continuing their day; no mandatory accusation, confession, or combat.
+1. The explorer arrives during the residents' ordinary morning loops. Anna tends the west beds, James checks the map board, and Thomas works near the bakery; these routes continue without dialogue being due.
+2. An ambient beat lets the explorer overhear that Rowan's dawn bell did not ring. Later, James and Thomas discuss the flour ledger shortage. These facts are public clues, not a forced quest sequence.
+3. The explorer uses the explicit talk control near Anna. Transcription yields a semantic event delivered to every eligible resident in earshot; each records that claim independently. Anna is nearest and gets reply priority. Her response is guarded because the player is unfamiliar; it reflects Anna's seedling-protection goal and does not reveal her private sighting. Residents outside range do not learn the claim.
+4. After a low-pressure exchange near Anna's garden, a locally authored trust/scene condition becomes eligible. Anna chooses to tell the explorer that she saw Thomas returning by the garden path before dawn. Her movement to/within the garden and the spoken line share the same intent.
+5. A later overheard bakery exchange gives Thomas's timeline contradiction. It is corroboration, not a verdict. The scene ends with residents continuing their day; no mandatory accusation, confession, or combat.
 
 For component acceptance, the core reducer can be exercised with synthetic typed events and authored utterance events. That does not satisfy live-experience acceptance: the eventual Quiet Bell demo includes an explicit PTT exchange, residents' independent in-earshot reactions, and subsequent clue disclosure only when conditions are met. The live acceptance slice keeps routine movement active and makes the nearest resident's spoken response and bounded social/action intent coherent.
 
@@ -56,7 +56,7 @@ For component acceptance, the core reducer can be exercised with synthetic typed
 - A selected beat determines both an allowlisted action and a bounded utterance intent; validation/failure falls back to the routine and authored line.
 - Identical initial state, event sequence, and seed produce the same beat/action/line intent.
 - No model receives hidden solution facts or controls world truth/actions. A model may return only a bounded player intent, topic, and response ID from the selected resident's safe option list; all spoken text is rendered from local authored content.
-- Component tests can inject synthetic typed events. The live Quiet Bell slice separately supports PTT, overhearing, independent reactions from in-earshot residents, a nearest-resident guarded Mira response, and later clue disclosure only when its conditions are met.
+- Component tests can inject synthetic typed events. The live Quiet Bell slice separately supports PTT, overhearing, independent reactions from in-earshot residents, a nearest-resident guarded Anna response, and later clue disclosure only when its conditions are met.
 
 ## Research and adaptation notes
 

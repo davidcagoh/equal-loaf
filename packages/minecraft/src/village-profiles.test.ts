@@ -1,6 +1,7 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
-import { villageDialogue, villageMysteryDialogue, villageProfiles } from './village-profiles.ts';
+import { VILLAGE_FACTS } from './village-cognition.ts';
+import { RESIDENT_DISPLAY_NAMES, villageDialogue, villageMysteryDialogue, villageProfiles } from './village-profiles.ts';
 
 test('village residents have distinct identities and multi-stop role routines', () => {
   assert.equal(villageProfiles.length, 3);
@@ -15,6 +16,23 @@ test('village residents have distinct identities and multi-stop role routines', 
     assert.equal(new Set(profile.routine.map(({ id }) => id)).size, profile.routine.length);
     assert.ok(profile.pauseMs >= 10_000);
   }
+});
+
+test('resident display names are ordinary and authored dialogue uses those names', () => {
+  assert.deepEqual(RESIDENT_DISPLAY_NAMES, { mira: 'Anna', tobin: 'James', pip: 'Thomas' });
+  assert.deepEqual(villageProfiles.map(({ id, username }) => [id, username]), [
+    ['mira', 'Anna'], ['tobin', 'James'], ['pip', 'Thomas'],
+  ]);
+  const lines = [...villageDialogue, ...villageMysteryDialogue].map(({ line }) => line).join('\n');
+  assert.match(lines, /Thomas,/);
+  assert.match(lines, /Anna,/);
+  assert.match(lines, /James,/);
+  assert.doesNotMatch(lines, /\b(Mira|Tobin|Pip)\b/);
+  const factCopy = Object.values(VILLAGE_FACTS).map(({ text }) => text).join('\n');
+  assert.match(factCopy, /Anna/);
+  assert.match(factCopy, /James/);
+  assert.match(factCopy, /Thomas/);
+  assert.doesNotMatch(factCopy, /\b(Mira|Tobin|Pip)\b/);
 });
 
 test('mystery clues are immutable authored beats with a distinct fixed progression', () => {
