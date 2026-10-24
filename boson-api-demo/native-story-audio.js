@@ -5,6 +5,7 @@ const REALTIME_URL = 'wss://api.boson.ai/v1/realtime';
 const MAX_DELTA_BASE64_CHARS = 256_000;
 const MAX_QUEUED_OUTPUT_SECONDS = 60;
 const MAX_OUTPUT_SECONDS_PER_RESPONSE = 120;
+const MAX_PENDING_PCM_REMAINDERS = 64;
 const VALID_PROVIDER_CODES = new Set([
   'invalid_request_error', 'authentication_error', 'rate_limit_exceeded', 'server_error',
   'session_expired', 'response_cancel_not_active', 'input_audio_buffer_commit_empty',
@@ -80,6 +81,42 @@ export function decodePcm16Base64Audio(value) {
   return samples;
 }
 
+export function decodePcm16Base64Chunk(value, pendingByte = null) {
+  if (typeof value !== 'string' || value.length > MAX_DELTA_BASE64_CHARS
+    || (pendingByte !== null && (!Number.isInteger(pendingByte) || pendingByte < 0 || pendingByte > 255))) {
+    return { valid: false, reason: typeof value === 'string' && value.length > MAX_DELTA_BASE64_CHARS ? 'encoded_too_large' : 'invalid_input', samples: null, pendingByte: null, encodedChars: typeof value === 'string' ? value.length : null, decodedBytes: null };
+  }
+  const paddingIndex = value.indexOf('=');
+  const unpaddedLength = paddingIndex < 0 ? value.length : paddingIndex;
+  if (value !== '' && (!/^[A-Za-z0-9+/]*={0,2}$/.test(value)
+    || unpaddedLength % 4 === 1
+    || (paddingIndex >= 0 && (value.length % 4 !== 0 || unpaddedLength % 4 !== (value.endsWith('==') ? 2 : 3))))) {
+    return { valid: false, reason: 'malformed_base64', samples: null, pendingByte: null, encodedChars: value.length, decodedBytes: null };
+  }
+  let binary;
+  try { binary = value === '' ? '' : atob(value); } catch {
+    return { valid: false, reason: 'malformed_base64', samples: null, pendingByte: null, encodedChars: value.length, decodedBytes: null };
+  }
+  if (binary.length > 192_000) {
+    return { valid: false, reason: 'decoded_too_large', samples: null, pendingByte: null, encodedChars: value.length, decodedBytes: binary.length };
+  }
+  const bytes = new Uint8Array(binary.length + (pendingByte === null ? 0 : 1));
+  if (pendingByte !== null) bytes[0] = pendingByte;
+  for (let index = 0; index < binary.length; index += 1) bytes[index + (pendingByte === null ? 0 : 1)] = binary.charCodeAt(index);
+  const completeByteCount = bytes.length - (bytes.length % 2);
+  const samples = new Float32Array(completeByteCount / 2);
+  const view = new DataView(bytes.buffer, bytes.byteOffset, completeByteCount);
+  for (let index = 0; index < samples.length; index += 1) samples[index] = view.getInt16(index * 2, true) / 32_768;
+  return {
+    valid: true,
+    reason: null,
+    samples,
+    pendingByte: completeByteCount < bytes.length ? bytes[bytes.length - 1] : null,
+    encodedChars: value.length,
+    decodedBytes: binary.length,
+  };
+}
+
 export function summarizeRealtimeAudioUsage(usage) {
   if (!usage || typeof usage !== 'object' || Array.isArray(usage)) return null;
   const inputDetails = usage.input_token_details && typeof usage.input_token_details === 'object'
@@ -132,6 +169,10 @@ function safeProviderId(value) {
   return typeof value === 'string' && /^[A-Za-z0-9:_-]{1,128}$/.test(value) ? value : null;
 }
 
+export function pcmRemainderKey(responseId, itemId, contentIndex) {
+  return JSON.stringify([responseId, itemId, contentIndex]);
+}
+
 function formatDuration(seconds) {
   if (!Number.isFinite(seconds) || seconds < 0) return '0:00';
   const total = Math.floor(seconds);
@@ -173,6 +214,7 @@ function bootNativePtt(root, resident) {
     queuedOutputSeconds: 0,
     responseOutputSeconds: 0,
     playingSources: new Set(),
+    pendingPcmBytes: new Map(),
     stoppedOutputResponses: new Set(),
     responsePlayback: createNativeResponsePlayback(),
     providerTokens: null,
@@ -190,6 +232,14 @@ function bootNativePtt(root, resident) {
     item.textContent = message;
     list.append(item);
     while (list.children.length > 12) list.firstElementChild.remove();
+  };
+  const discardPcmRemainders = (reason, onlyResponseId = null) => {
+    for (const [key, remainder] of state.pendingPcmBytes) {
+      if (onlyResponseId && remainder.responseId !== onlyResponseId) continue;
+      diagnostic(`Incomplete PCM sample byte discarded · reason=${reason} · response=${remainder.responseId}`
+        + ` · encoded_chars=${remainder.encodedChars} · decoded_bytes=${remainder.decodedBytes}`);
+      state.pendingPcmBytes.delete(key);
+    }
   };
   const status = (id, value, stateName = '') => {
     const node = byId(id);
@@ -224,6 +274,7 @@ function bootNativePtt(root, resident) {
     return true;
   };
   const stopOutput = (reason) => {
+    discardPcmRemainders(reason);
     const stoppedSources = state.playingSources.size;
     const queuedMilliseconds = Math.round(state.queuedOutputSeconds * 1_000);
     if (stoppedSources > 0 || queuedMilliseconds > 0) {
@@ -278,6 +329,7 @@ function bootNativePtt(root, resident) {
     stopCapture();
     stopOutput(reason);
     state.responsePlayback.reset();
+    discardPcmRemainders(reason);
     state.stoppedOutputResponses.clear();
     for (const timer of state.timers) clearTimeout(timer);
     state.timers.clear();
@@ -351,7 +403,30 @@ function bootNativePtt(root, resident) {
     if (!state.audioContext) return { accepted: false, reason: 'audio_context_unavailable' };
     const responseId = safeProviderId(event.response_id) ?? state.activeResponseId;
     if (!responseId || !state.responsePlayback.acceptsAudio(responseId)) return { accepted: true, ignored: true };
-    const samples = decodePcm16Base64Audio(encoded);
+    const itemId = safeProviderId(event.item_id);
+    const contentIndex = Number.isSafeInteger(event.content_index) && event.content_index >= 0 ? event.content_index : 0;
+    const carryKey = pcmRemainderKey(responseId, itemId, contentIndex);
+    const decoded = decodePcm16Base64Chunk(encoded, state.pendingPcmBytes.get(carryKey)?.byte ?? null);
+    if (!decoded.valid) return {
+      accepted: false, reason: 'invalid_pcm_delta', subtype: decoded.reason,
+      encodedChars: decoded.encodedChars, decodedBytes: decoded.decodedBytes,
+    };
+    if (decoded.pendingByte === null) state.pendingPcmBytes.delete(carryKey);
+    else {
+      if (!state.pendingPcmBytes.has(carryKey) && state.pendingPcmBytes.size >= MAX_PENDING_PCM_REMAINDERS) {
+        return { accepted: false, reason: 'pcm_fragment_state_limit', subtype: 'fragment_map_limit', encodedChars: decoded.encodedChars, decodedBytes: decoded.decodedBytes };
+      }
+      state.pendingPcmBytes.set(carryKey, {
+      byte: decoded.pendingByte,
+      responseId,
+      itemId,
+      contentIndex,
+      encodedChars: decoded.encodedChars,
+      decodedBytes: decoded.decodedBytes,
+      });
+    }
+    const samples = decoded.samples;
+    if (samples.length === 0) return { accepted: true, ignored: true, encodedChars: decoded.encodedChars, decodedBytes: decoded.decodedBytes };
     const decision = evaluateNativeAudioChunk({
       hasContext: true,
       responseAccepted: true,
@@ -377,8 +452,8 @@ function bootNativePtt(root, resident) {
     const record = { source, responseId };
     state.playingSources.add(record);
     state.responsePlayback.addChunk(responseId, {
-      itemId: safeProviderId(event.item_id),
-      contentIndex: Number.isSafeInteger(event.content_index) ? event.content_index : 0,
+      itemId,
+      contentIndex,
       startAt,
       duration,
     });
@@ -442,7 +517,11 @@ function bootNativePtt(root, resident) {
       if (!scheduled.accepted) {
         const responseId = safeProviderId(event.response_id) ?? state.activeResponseId ?? 'unknown';
         const itemId = safeProviderId(event.item_id) ?? 'unknown';
-        diagnostic(`Audio output rejected · ${scheduled.reason} · response=${responseId} · item=${itemId} · queued_ms=${Math.round(state.queuedOutputSeconds * 1_000)}`);
+        diagnostic(`Audio output rejected · ${scheduled.reason} · response=${responseId} · item=${itemId}`
+          + ` · encoded_chars=${Number.isSafeInteger(scheduled.encodedChars) ? scheduled.encodedChars : 0}`
+          + ` · decoded_bytes=${Number.isSafeInteger(scheduled.decodedBytes) ? scheduled.decodedBytes : 'unknown'}`
+          + ` · reject=${scheduled.subtype ?? 'audio_limit'}`
+          + ` · queued_ms=${Math.round(state.queuedOutputSeconds * 1_000)}`);
         interruptOutput(`output_rejected_${scheduled.reason}`);
         status('response-state', `Response stopped · ${scheduled.reason.replaceAll('_', ' ')}.`, 'warn');
         refreshControls();
@@ -463,6 +542,7 @@ function bootNativePtt(root, resident) {
         ?? state.interruptionPending?.responseId ?? state.activeResponseId;
       const interruptedCompletion = Boolean(state.interruptionPending);
       if (responseId) {
+        discardPcmRemainders('response_finished', responseId);
         if (state.interruptionPending) finalizeInterruption(responseId);
         else state.responsePlayback.finish(responseId);
         if (state.activeResponseId === responseId) state.activeResponseId = null;
