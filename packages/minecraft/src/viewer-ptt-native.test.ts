@@ -134,7 +134,33 @@ test('trusted PTT gesture bootstraps bounded reaction sessions without a second 
       reactionStream: '/boson-ptt/reaction/stream?residentSessionId=session_mira_0002' },
   ] };
   let activationRequests = 0;
+  let delayedMiraSocket: any;
+  class DelayedMiraSocket extends FakeSocket {
+    pendingSessionUpdate: any;
+    constructor(url: string, protocols: string[]) {
+      super(url, protocols);
+      if (protocols.includes('bai-client-secret.bai-eph-mira')) delayedMiraSocket = this;
+    }
+    send(raw: string) {
+      const message = JSON.parse(raw);
+      if (this.protocols.includes('bai-client-secret.bai-eph-mira') && message.type === 'session.update') {
+        this.sent.push(message);
+        this.pendingSessionUpdate = message;
+        return;
+      }
+      super.send(raw);
+    }
+    acknowledgeSession() {
+      const input = this.pendingSessionUpdate.session.audio.input;
+      this.message({ type: 'session.updated', session: { output_modalities: ['audio'], audio: {
+        input: { format: { type: 'audio/pcm', rate: 24_000 }, turn_detection: null,
+          ...(input.transcription ? { transcription: input.transcription } : {}) },
+        output: { format: { type: 'audio/pcm', rate: 24_000 }, voice: this.pendingSessionUpdate.session.audio.output.voice },
+      }, tools: [], tool_choice: 'none' } });
+    }
+  }
   const { client, requests, micRequests } = setupClient({
+    enableInputTranscription: true,
     fetchImpl: async (path: string, request: any) => {
       const body = request.body ? JSON.parse(request.body) : {};
       requests.push({ path, body });
@@ -149,17 +175,25 @@ test('trusted PTT gesture bootstraps bounded reaction sessions without a second 
       if (path === '/boson-ptt/reaction/speech/start') return { ok: true, status: 200, json: async () => ({ accepted: true, status: 'started' }) };
       if (path === '/boson-ptt/reaction/speech/finish') return { ok: true, status: 200, json: async () => ({ accepted: true, status: 'finished' }) };
       return { ok: true, status: 200, json: async () => ({ accepted: true }) };
-    },
+    }, WebSocketClass: DelayedMiraSocket as any,
   });
   await client.beginHeldTurn('pointer');
-  await settle(); await settle();
   assert.deepEqual(requests.find(({ path }) => path === '/boson-ptt/native-audio/activate')?.body, {});
   assert.equal(requests.filter(({ path }) => path === '/boson-ptt/native-audio/activate').length, 2,
     'a lost activation response is retried once using the same empty request');
   assert.equal(requests.filter(({ path }) => path === '/boson-ptt/native/credential').length, 0,
     'activation credential is used directly to create each persistent resident socket');
   assert.equal(client.connections.size, 2);
+  assert.equal(client.connections.get('session_mira_0002').ready, false,
+    'the held PTT turn does not wait for the unrelated resident WebSocket handshake');
+  assert.equal(micRequests(), 1);
+  delayedMiraSocket.acknowledgeSession();
+  await settle(); await settle();
   assert.equal(FakeEventSource.instances.length, 2);
+  assert.ok(client.connections.get('session_pip_0001').socket.sent.some(({ type, session }) => type === 'session.update'
+    && session.instructions === 'Prompt for Thomas'
+    && session.audio.input.transcription.model === 'higgs-stt-3.1'),
+  'an activated session updates to the selected PTT prompt and the PTT-specific transcription setting');
   assert.equal(micRequests(), 1, 'only the held PTT turn opens microphone capture');
   client.updateResidentPositions(JSON.stringify({ type: 'village.residents', timestamp: Date.now(), playerPosition: { x: 0, y: 0, z: 0 },
     residents: [
@@ -257,7 +291,7 @@ test('reaction dispatch stays session-bound, requests text-only response, and fi
   assert.equal(pip.socket.sent.some(({ type }) => type === 'input_audio_buffer.append'), false);
 
   await client.handleRealtimeEvent(mira, { type: 'response.created', response: { id: 'reaction-response-2' } });
-  await client.handleRealtimeEvent(mira, { type: 'response.output_audio_transcript.delta', response_id: 'reaction-response-2', item_id: 'reaction-item-2', delta: 'The bakery is ready.' });
+  await client.handleRealtimeEvent(mira, { type: 'response.output_audio_transcript.delta', response_id: 'reaction-response-2', item_id: 'reaction-item-2', delta: '語'.repeat(400) });
   await client.handleRealtimeEvent(mira, { type: 'response.output_audio.delta', response_id: 'reaction-response-2', item_id: 'reaction-item-2',
     content_index: 0, delta: encodePcm16(new Float32Array(2_400)) });
   await client.handleRealtimeEvent(pip, { type: 'response.created', response: { id: 'reaction-response-1' } });
@@ -277,8 +311,11 @@ test('reaction dispatch stays session-bound, requests text-only response, and fi
   const reactionFinish = requests.find(({ path, body }) => path === '/boson-ptt/reaction/speech/finish' && body.reactionId === 'reaction-1');
   assert.deepEqual(reactionFinish?.body, { reactionId: 'reaction-1', residentSessionId: 'session_pip_0001',
     responseId: 'reaction-response-1', itemId: 'reaction-item-1', playback: 'completed', transcript: 'I will water them.' });
-  assert.ok(requests.some(({ path, body }) => path === '/boson-ptt/reaction/speech/finish'
-    && body.reactionId === 'reaction-2' && body.residentSessionId === 'session_mira_0002' && body.playback === 'completed'));
+  const longTranscriptFinish = requests.find(({ path, body }) => path === '/boson-ptt/reaction/speech/finish'
+    && body.reactionId === 'reaction-2' && body.residentSessionId === 'session_mira_0002');
+  assert.equal(longTranscriptFinish?.body.playback, 'completed');
+  assert.equal(new TextEncoder().encode(longTranscriptFinish.body.transcript).length, 999,
+    'completed reaction transcripts fit the server UTF-8 byte limit without splitting a code point');
   client.stop();
 });
 
@@ -383,6 +420,71 @@ test('PTT interrupts its resident reaction and leaves another resident reaction 
   assert.ok([...client.mixer.utterances.values()].some(({ speakerId }) => speakerId === 'mira'),
     'the other resident keeps speaking while PTT starts for Pip');
   assert.equal(micRequests, 2);
+  client.stop();
+});
+
+test('PTT waits for in-flight reaction speech start and prevents its audio from entering the mixer', async () => {
+  FakeSocket.instances = []; FakeAudioContext.instances = []; FakeEventSource.instances = [];
+  let beginCount = 0;
+  let resolveSpeechStart: ((response: any) => void) | undefined;
+  const activation = { available: true, activationId: 'activation-start-race', sessions: [
+    { residentSessionId: 'session_pip_0001', residentId: 'pip', speakerName: 'Pip', voice: 'jake', instructions: 'Pip prompt.',
+      position: { x: 2, y: 0, z: 0 }, shortLivedCredential: 'bai-eph-pip', expiresAt: Math.floor(Date.now() / 1_000) + 60,
+      reactionStream: '/boson-ptt/reaction/stream?residentSessionId=session_pip_0001' },
+  ] };
+  const requests: Array<{ path: string; body: any }> = [];
+  const client = new NativeResidentAudioClient({
+    fetchImpl: async (path: string, request: any) => {
+      const body = request.body ? JSON.parse(request.body) : {};
+      requests.push({ path, body });
+      if (path === '/boson-ptt/native-audio/activate') return { ok: true, status: 200, json: async () => activation };
+      if (path === '/boson-ptt/native/begin') {
+        beginCount += 1;
+        return { ok: true, status: 200, json: async () => ({ available: true, ...residents[0],
+          reuseSession: beginCount > 1, instructions: `Prompt ${beginCount}` }) };
+      }
+      if (path === '/boson-ptt/reaction/ack') return { ok: true, status: 200, json: async () => ({ accepted: true, status: 'accepted' }) };
+      if (path === '/boson-ptt/reaction/speech/start') return new Promise((resolve) => {
+        resolveSpeechStart = (value) => resolve({ ok: true, status: 200, json: async () => value });
+      });
+      if (path === '/boson-ptt/reaction/speech/finish') return { ok: true, status: 200, json: async () => ({ accepted: true, status: 'interrupted' }) };
+      return { ok: true, status: 200, json: async () => ({ accepted: true }) };
+    },
+    WebSocketClass: FakeSocket as any, AudioContextClass: FakeAudioContext as any, AudioWorkletNodeClass: FakeWorkletNode as any,
+    EventSourceClass: FakeEventSource as any, getPositionSocket: () => null,
+    mediaDevices: { getUserMedia: async () => ({ getTracks: () => [{ stop() {} }] }) },
+  });
+  await client.beginHeldTurn('key');
+  const firstTurn = client.turn;
+  client.releaseHeldTurn();
+  await client.handleRealtimeEvent(firstTurn.connection, { type: 'input_audio_buffer.committed' });
+  await client.handleRealtimeEvent(firstTurn.connection, { type: 'response.done', response: { id: 'ptt-before-reaction', status: 'completed' } });
+  await settle(); await settle();
+  const pip = client.connections.get('session_pip_0001');
+  FakeEventSource.instances[0]!.event('native-reaction', { version: 1, type: 'native.reaction.dispatch',
+    reactionId: 'reaction-start-pending', eventId: 'event-start-pending', residentId: 'pip', context: 'Mira mentioned the garden.',
+    causalDepth: 1, expiresAt: Date.now() + 30_000 });
+  await settle(); await settle();
+  await client.handleRealtimeEvent(pip, { type: 'response.created', response: { id: 'reaction-start-pending-response' } });
+  await client.handleRealtimeEvent(pip, { type: 'response.output_audio_transcript.delta', response_id: 'reaction-start-pending-response',
+    item_id: 'reaction-start-pending-item', delta: 'I can help.' });
+  const pendingAudio = client.handleRealtimeEvent(pip, { type: 'response.output_audio.delta', response_id: 'reaction-start-pending-response',
+    item_id: 'reaction-start-pending-item', content_index: 0, delta: encodePcm16(new Float32Array(2_400)) });
+  await settle();
+  assert.equal(FakeAudioContext.instances[0].sources.length, 0, 'audio waits on the server start acknowledgement');
+
+  const pttStarting = client.beginHeldTurn('key');
+  await settle();
+  resolveSpeechStart?.({ accepted: true, status: 'started' });
+  await pendingAudio;
+  await settle(); await settle();
+  await client.handleRealtimeEvent(pip, { type: 'response.done', response: { id: 'reaction-start-pending-response', status: 'cancelled' } });
+  await pttStarting;
+  await settle(); await settle();
+  assert.equal(client.turn.residentSessionId, 'session_pip_0001');
+  assert.equal(FakeAudioContext.instances[0].sources.length, 0, 'interrupted audio never enters the mixer after start ACK');
+  assert.ok(requests.some(({ path, body }) => path === '/boson-ptt/reaction/speech/finish'
+    && body.reactionId === 'reaction-start-pending' && body.playback === 'interrupted' && !('transcript' in body)));
   client.stop();
 });
 
