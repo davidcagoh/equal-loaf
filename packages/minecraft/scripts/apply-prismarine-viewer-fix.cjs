@@ -1,7 +1,14 @@
 const fs = require('node:fs')
 const path = require('node:path')
+const { spawnSync } = require('node:child_process')
 
 const viewerRoot = path.join(__dirname, '..', 'node_modules', 'prismarine-viewer')
+const webpackPath = process.env.BOSON_WEBPACK_BIN || path.join(__dirname, '..', 'node_modules', '.bin', 'webpack')
+if (!fs.existsSync(webpackPath)) {
+  console.warn('Skipping Prismarine Viewer patch: webpack is unavailable. Install packages/minecraft devDependencies to build the Boson viewer bundle.')
+  process.exit(0)
+}
+
 const viewerPackage = require(path.join(viewerRoot, 'package.json'))
 
 if (viewerPackage.version !== '1.33.0') {
@@ -33,6 +40,16 @@ function replaceAnyExpected (relativePath, alternatives, after) {
   const before = alternatives.find((candidate) => source.includes(candidate))
   if (!before) throw new Error(`Could not find expected Prismarine Viewer code in ${relativePath}`)
   fs.writeFileSync(filePath, source.replace(before, after))
+}
+
+function replaceSection (relativePath, startMarker, endMarker, replacement, completionMarker) {
+  const filePath = path.join(viewerRoot, relativePath)
+  const source = fs.readFileSync(filePath, 'utf8')
+  if (source.includes(completionMarker)) return
+  const start = source.indexOf(startMarker)
+  const end = source.indexOf(endMarker, start)
+  if (start < 0 || end < 0) throw new Error(`Could not find expected Prismarine Viewer section in ${relativePath}`)
+  fs.writeFileSync(filePath, source.slice(0, start) + replacement + source.slice(end))
 }
 
 replaceExpected(
@@ -96,39 +113,9 @@ replaceExpected(
   ''
 )
 replaceExpected(
-  'lib/index.js',
-  'if (pos.y > 0 && firstPositionUpdate) {',
-  'if (firstPositionUpdate) {'
-)
-replaceExpected(
-  'lib/index.js',
-  'let firstPositionUpdate = true\n',
-  'let firstPositionUpdate = true\nlet followPosition\n'
-)
-replaceExpected(
-  'lib/index.js',
-  "      controls.update()\n      firstPositionUpdate = false\n    }\n    if (addMesh) {",
-  "      controls.update()\n      firstPositionUpdate = false\n    } else if (followPosition) {\n      const dx = pos.x - followPosition.x\n      const dy = pos.y - followPosition.y\n      const dz = pos.z - followPosition.z\n      viewer.camera.position.x += dx\n      viewer.camera.position.y += dy\n      viewer.camera.position.z += dz\n      controls.target.x += dx\n      controls.target.y += dy\n      controls.target.z += dz\n      controls.update()\n    }\n    followPosition = { x: pos.x, y: pos.y, z: pos.z }\n    if (addMesh) {"
-)
-replaceExpected(
-  'public/index.js',
-  'if(s&&(h.target.set(t.x,t.y,t.z),u.camera.position.set(t.x,t.y+20,t.z+20),h.update(),s=!1),i){',
-  'if(s){h.target.set(t.x,t.y,t.z),u.camera.position.set(t.x,t.y+20,t.z+20),h.update(),f={x:t.x,y:t.y,z:t.z},s=!1}else if(f){const e=t.x-f.x,n=t.y-f.y,r=t.z-f.z;u.camera.position.x+=e,u.camera.position.y+=n,u.camera.position.z+=r,h.target.x+=e,h.target.y+=n,h.target.z+=r,h.update()}f={x:t.x,y:t.y,z:t.z};if(i){'
-)
-replaceExpected(
-  'public/index.js',
-  'let e;s=!0,u.listen(o),o.on("position"',
-  'let e,f;s=!0,u.listen(o),o.on("position"'
-)
-replaceExpected(
   'public/index.html',
   '      canvas {\n',
   '      .camera-help {\n        position: fixed;\n        z-index: 1;\n        left: 16px;\n        bottom: 16px;\n        padding: 10px 14px;\n        border: 1px solid rgba(255,255,255,.18);\n        border-radius: 8px;\n        background: rgba(15,23,42,.82);\n        color: #f8fafc;\n        font: 13px/1.4 system-ui, sans-serif;\n        pointer-events: none;\n      }\n\n      canvas {\n'
-)
-replaceExpected(
-  'public/index.html',
-  '  <body>\n',
-  '  <body>\n    <div class="camera-help" role="status">Drag to look · scroll to zoom · right-drag to pan</div>\n'
 )
 replaceExpected(
   'lib/mineflayer.js',
@@ -147,62 +134,203 @@ replaceExpected(
   '"textures": {\n      "default": "textures/entity/villager/type/plains",\n      "farmer": "textures/entity/villager/profession/farmer",'
 )
 replaceExpected(
-  'public/index.js',
-  '"textures":{"farmer":"textures/entity/villager/profession/farmer"',
-  '"textures":{"default":"textures/entity/villager/type/plains","farmer":"textures/entity/villager/profession/farmer"'
+  'lib/index.js',
+  'let firstPositionUpdate = true\n',
+  'let firstPositionUpdate = true\nlet targetPose\nlet currentPose\nlet currentCameraDistance = 3.5\nlet previousFrameTime = performance.now()\n'
 )
+replaceExpected(
+  'lib/index.js',
+  "global.THREE = require('three')\nconst TWEEN = require('@tweenjs/tween.js')\nrequire('three/examples/js/controls/OrbitControls')",
+  "const THREE = global.THREE = require('three')\nconst { OrbitControls } = require('three/examples/jsm/controls/OrbitControls')\nconst TWEEN = require('@tweenjs/tween.js')"
+)
+replaceExpected(
+  'lib/index.js',
+  'new THREE.OrbitControls(viewer.camera, renderer.domElement)',
+  'new OrbitControls(viewer.camera, renderer.domElement)'
+)
+replaceExpected(
+  'lib/index.js',
+  "const { Viewer, Entity } = require('../viewer')\n",
+  "const { Viewer, Entity } = require('../viewer')\nconst followCamera = require('./boson-follow-camera')\nconst FOLLOW_CAMERA_DISTANCE = 3.5\nconst CAMERA_COLLISION_RADIUS = 0.12\nconst CAMERA_COLLISION_CLEARANCE = 0.16\n"
+)
+replaceSection(
+  'lib/index.js',
+  'function animate () {',
+  '\n}\nanimate()',
+  `const cameraRaycaster = new THREE.Raycaster()
+const cameraPivot = new THREE.Vector3()
+const cameraForward = new THREE.Vector3()
+const cameraBackward = new THREE.Vector3()
+const cameraRight = new THREE.Vector3()
+const cameraUp = new THREE.Vector3()
+const cameraRayOrigin = new THREE.Vector3()
+const cameraPosition = new THREE.Vector3()
+const cameraBoomEnd = new THREE.Vector3()
+const cameraOffsets = [
+  [-1, -1], [0, -1], [1, -1],
+  [-1, 0], [1, 0],
+  [-1, 1], [0, 1], [1, 1]
+]
 
-replaceExpected(
-  'public/index.js',
-  'this.scene=t,this.loadedChunks={},this.sectionsOutstanding=',
-  'this.scene=t,this.loadedChunks={},this.chunkHeightRanges={},this.sectionsOutstanding='
+function updateFollowCamera (deltaSeconds) {
+  if (!targetPose) return
+
+  if (!currentPose) {
+    currentPose = { ...targetPose, position: { ...targetPose.position } }
+  } else {
+    const amount = 1 - Math.exp(-14 * deltaSeconds)
+    currentPose = {
+      position: {
+        x: currentPose.position.x + (targetPose.position.x - currentPose.position.x) * amount,
+        y: currentPose.position.y + (targetPose.position.y - currentPose.position.y) * amount,
+        z: currentPose.position.z + (targetPose.position.z - currentPose.position.z) * amount
+      },
+      yaw: followCamera.interpolateAngle(currentPose.yaw, targetPose.yaw, amount),
+      pitch: followCamera.interpolateAngle(currentPose.pitch, targetPose.pitch, amount),
+      eyeHeight: targetPose.eyeHeight
+    }
+  }
+
+  const { position, yaw, pitch, eyeHeight } = currentPose
+  cameraPivot.set(position.x, position.y + eyeHeight, position.z)
+  const direction = followCamera.viewDirection(yaw, pitch)
+  cameraForward.set(direction.x, direction.y, direction.z).normalize()
+  cameraBackward.copy(cameraForward).negate()
+  cameraRight.set(Math.cos(yaw), 0, -Math.sin(yaw))
+  cameraUp.crossVectors(cameraRight, cameraForward).normalize()
+
+  const hitDistances = []
+  cameraRaycaster.far = FOLLOW_CAMERA_DISTANCE
+  cameraBoomEnd.copy(cameraPivot).addScaledVector(cameraBackward, FOLLOW_CAMERA_DISTANCE)
+  const meshes = followCamera.selectNearbySectionMeshes(
+    viewer.world.sectionMeshs,
+    cameraPivot,
+    cameraBoomEnd,
+    CAMERA_COLLISION_RADIUS
+  )
+  for (const [horizontal, vertical] of cameraOffsets) {
+    cameraRayOrigin.copy(cameraPivot)
+      .addScaledVector(cameraRight, horizontal * CAMERA_COLLISION_RADIUS)
+      .addScaledVector(cameraUp, vertical * CAMERA_COLLISION_RADIUS)
+    cameraRaycaster.set(cameraRayOrigin, cameraBackward)
+    const hit = cameraRaycaster.intersectObjects(meshes, false)[0]
+    if (hit) hitDistances.push(hit.distance)
+  }
+
+  const safeDistance = followCamera.resolveBoomDistance(
+    FOLLOW_CAMERA_DISTANCE,
+    hitDistances,
+    CAMERA_COLLISION_CLEARANCE
+  )
+  if (safeDistance < currentCameraDistance) {
+    currentCameraDistance = safeDistance
+  } else {
+    const zoomOutAmount = 1 - Math.exp(-4.5 * deltaSeconds)
+    currentCameraDistance += (safeDistance - currentCameraDistance) * zoomOutAmount
+  }
+
+  const posePosition = followCamera.cameraPosition(position, yaw, pitch, eyeHeight, currentCameraDistance)
+  cameraPosition.set(posePosition.x, posePosition.y, posePosition.z)
+  viewer.camera.position.copy(cameraPosition)
+  viewer.camera.lookAt(cameraPivot)
+}
+
+function animate (frameTime) {
+  window.requestAnimationFrame(animate)
+  const deltaSeconds = Math.min(Math.max((frameTime - previousFrameTime) / 1000, 0), 0.1)
+  previousFrameTime = frameTime
+  if (controls) controls.update()
+  updateFollowCamera(deltaSeconds)
+  viewer.update()
+  renderer.render(viewer.scene, viewer.camera)`,
+  'function updateFollowCamera (deltaSeconds)'
 )
 replaceExpected(
-  'public/index.js',
-  'this.sectionMeshs={};for(const t of this.workers)t.postMessage({type:"reset"})',
-  'this.sectionMeshs={},this.chunkHeightRanges={};for(const t of this.workers)t.postMessage({type:"reset"})'
+  'lib/index.js',
+  'const cameraPosition = new THREE.Vector3()\n',
+  'const cameraPosition = new THREE.Vector3()\nconst cameraBoomEnd = new THREE.Vector3()\n'
+)
+replaceExpected(
+  'lib/index.js',
+  '  const hitDistances = []\n  const meshes = Object.values(viewer.world.sectionMeshs)\n  cameraRaycaster.far = FOLLOW_CAMERA_DISTANCE\n',
+  `  const hitDistances = []
+  cameraRaycaster.far = FOLLOW_CAMERA_DISTANCE
+  cameraBoomEnd.copy(cameraPivot).addScaledVector(cameraBackward, FOLLOW_CAMERA_DISTANCE)
+  const meshes = followCamera.selectNearbySectionMeshes(
+    viewer.world.sectionMeshs,
+    cameraPivot,
+    cameraBoomEnd,
+    CAMERA_COLLISION_RADIUS
+  )
+`
+)
+replaceExpected(
+  'lib/index.js',
+  '  firstPositionUpdate = true\n  viewer.listen(socket)',
+  '  firstPositionUpdate = true\n  targetPose = undefined\n  currentPose = undefined\n  currentCameraDistance = FOLLOW_CAMERA_DISTANCE\n  viewer.listen(socket)'
+)
+replaceSection(
+  'lib/index.js',
+  '  let botMesh\n  socket.on(\'position\', ({ pos, addMesh, yaw, pitch }) => {',
+  '\n  })\n})',
+  `  let botMesh
+  socket.on('position', ({ pos, addMesh, yaw, pitch, eyeHeight }) => {
+    if (!pos || ![pos.x, pos.y, pos.z, yaw, pitch].every(Number.isFinite)) return
+
+    targetPose = {
+      position: { x: pos.x, y: pos.y, z: pos.z },
+      yaw,
+      pitch,
+      eyeHeight: Number.isFinite(eyeHeight) && eyeHeight > 0 ? eyeHeight : 1.6
+    }
+
+    if (firstPositionUpdate) {
+      if (controls) {
+        controls.dispose()
+        controls = null
+      }
+      currentPose = { ...targetPose, position: { ...targetPose.position } }
+      currentCameraDistance = FOLLOW_CAMERA_DISTANCE
+      firstPositionUpdate = false
+    }
+
+    if (addMesh) {
+      if (!botMesh) {
+        botMesh = new Entity('1.16.4', 'player', viewer.scene).mesh
+        viewer.scene.add(botMesh)
+      }
+      new TWEEN.Tween(botMesh.position).to({ x: pos.x, y: pos.y, z: pos.z }, 50).start()
+
+      const da = (yaw - botMesh.rotation.y) % (Math.PI * 2)
+      const dy = 2 * da % (Math.PI * 2) - da
+      new TWEEN.Tween(botMesh.rotation).to({ y: botMesh.rotation.y + dy }, 50).start()
+    }
+  `,
+  "  socket.on('position', ({ pos, addMesh, yaw, pitch, eyeHeight }) => {"
+)
+replaceExpected(
+  'lib/mineflayer.js',
+  `      const packet = { pos: bot.entity.position, yaw: bot.entity.yaw, addMesh: true }
+      if (firstPerson) {
+        packet.pitch = bot.entity.pitch
+      }`,
+  '      const packet = { pos: bot.entity.position, yaw: bot.entity.yaw, pitch: bot.entity.pitch, eyeHeight: bot.entity.eyeHeight, addMesh: true }'
 )
 replaceAnyExpected(
-  'public/index.js',
+  'public/index.html',
   [
-    'addColumn(t,e,i){this.loadedChunks[`${t},${e}`]=!0;let r=JSON.parse(i),o=r.minY??0,a=r.worldHeight??256;this.chunkHeightRanges[`${t},${e}`]={minY:o,worldHeight:a};for(const n of this.workers)n.postMessage({type:"chunk",x:t,z:e,chunk:i});for(let i=o;i<o+a;i+=16){',
-    'addColumn(t,e,i){this.loadedChunks[`${t},${e}`]=!0;for(const n of this.workers)n.postMessage({type:"chunk",x:t,z:e,chunk:i});for(let i=0;i<256;i+=16){'
+    '  <body>\n    <div class="camera-help" role="status">Drag to look · scroll to zoom · right-drag to pan</div>\n',
+    '  <body>\n'
   ],
-  'addColumn(t,e,i){this.loadedChunks[`${t},${e}`]=!0;const chunkData=JSON.parse(i),o=chunkData.minY??0,a=chunkData.worldHeight??256;this.chunkHeightRanges[`${t},${e}`]={minY:o,worldHeight:a};for(const n of this.workers)n.postMessage({type:"chunk",x:t,z:e,chunk:i});for(let i=o;i<o+a;i+=16){'
-)
-replaceExpected(
-  'public/index.js',
-  'removeColumn(t,e){delete this.loadedChunks[`${t},${e}`];for(const i of this.workers)i.postMessage({type:"unloadChunk",x:t,z:e});for(let i=0;i<256;i+=16){',
-  'removeColumn(t,e){delete this.loadedChunks[`${t},${e}`];let{minY:o=0,worldHeight:a=256}=this.chunkHeightRanges[`${t},${e}`]||{};delete this.chunkHeightRanges[`${t},${e}`];for(const i of this.workers)i.postMessage({type:"unloadChunk",x:t,z:e});for(let i=o;i<o+a;i+=16){'
-)
-replaceAnyExpected(
-  'public/index.js',
-  ['if(t.y>0&&s&&', 'if(s&&'],
-  'if(s){'
-)
-replaceExpected(
-  'public/index.js',
-  'this.world=new a(this.scene)',
-  'this.world=new a(this.scene,1)'
+  '  <body>\n    <div class="camera-help" role="status">Third-person view follows the explorer’s look direction</div>\n'
 )
 
-replaceExpected(
-  'public/worker.js',
-  'i.sections[Math.floor(a/16)]',
-  'i.sections[Math.floor((a-(i.minY??0))/16)]'
-)
-replaceExpected(
-  'public/worker.js',
-  'l.sections[Math.floor(n/16)]',
-  'l.sections[Math.floor((n-(l.minY??0))/16)]'
-)
-replaceExpected(
-  'public/worker.js',
-  'addColumn(e,t,n){const a=this.Chunk.fromJson(n);return this.columns[i(e,t)]=a,a}',
-  'addColumn(e,t,n){const r=JSON.parse(n),a=this.Chunk.fromJson(n);return Number.isInteger(r.minY)&&(a.minY=r.minY),Number.isInteger(r.worldHeight)&&(a.worldHeight=r.worldHeight),this.columns[i(e,t)]=a,a}'
-)
+fs.copyFileSync(path.join(__dirname, 'follow-camera.cjs'), path.join(viewerRoot, 'lib', 'boson-follow-camera.js'))
+const build = spawnSync(webpackPath, ['--config', 'webpack.config.js'], { cwd: viewerRoot, stdio: 'inherit' })
+if (build.error || build.status !== 0) throw build.error || new Error(`Prismarine Viewer webpack exited with ${build.status}`)
+
 {
-  const filePath = path.join(viewerRoot, 'public/worker.js')
+  const filePath = path.join(viewerRoot, 'public', 'worker.js')
   const source = fs.readFileSync(filePath, 'utf8')
   const updated = source.replace(/if\([\w$]+\.position\.y<0\)continue;?/g, '')
   if (updated !== source) fs.writeFileSync(filePath, updated)

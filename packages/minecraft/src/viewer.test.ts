@@ -1,5 +1,6 @@
 import assert from 'node:assert/strict';
 import { createHash } from 'node:crypto';
+import { spawnSync } from 'node:child_process';
 import { createRequire } from 'node:module';
 import { readFileSync } from 'node:fs';
 import { createConnection } from 'node:net';
@@ -11,16 +12,90 @@ import { startLoopbackViewer } from './viewer.ts';
 import { isVillageDialogue, volumeForDistance } from './viewer-audio.js';
 
 const require = createRequire(import.meta.url);
+const followCamera = require('../scripts/follow-camera.cjs') as {
+  viewDirection(yaw: number, pitch: number): { x: number; y: number; z: number };
+  cameraPosition(position: { x: number; y: number; z: number }, yaw: number, pitch: number, eyeHeight: number, distance: number): { x: number; y: number; z: number };
+  interpolateAngle(current: number, target: number, amount: number): number;
+  selectNearbySectionMeshes(sectionMeshes: Record<string, unknown>, start: { x: number; y: number; z: number }, end: { x: number; y: number; z: number }, radius?: number, sectionSize?: number): unknown[];
+  resolveBoomDistance(distance: number, hitDistances: number[], clearance?: number, minDistance?: number): number;
+};
+
+test('builds a rear camera pose from the Mineflayer view angles', () => {
+  const direction = followCamera.viewDirection(0, 0);
+  assert.ok(Math.abs(direction.x) < 1e-12);
+  assert.equal(direction.y, 0);
+  assert.equal(direction.z, -1);
+
+  const behindNorth = followCamera.cameraPosition({ x: 10, y: 64, z: 20 }, 0, 0, 1.62, 3.5);
+  assert.deepEqual(behindNorth, { x: 10, y: 65.62, z: 23.5 });
+  const lookDown = followCamera.cameraPosition({ x: 0, y: 0, z: 0 }, 0, Math.PI / 4, 1.6, 4);
+  assert.ok(lookDown.y < 1.6);
+  assert.ok(lookDown.z > 0);
+});
+
+test('interpolates yaw across the wrap and retracts the camera boom before an obstacle', () => {
+  const nearPositivePi = Math.PI - 0.02;
+  const nearNegativePi = -Math.PI + 0.02;
+  const midpoint = followCamera.interpolateAngle(nearPositivePi, nearNegativePi, 0.5);
+  assert.ok(Math.abs(Math.abs(midpoint) - Math.PI) < 1e-12);
+
+  assert.equal(followCamera.resolveBoomDistance(3.5, []), 3.5);
+  assert.equal(followCamera.resolveBoomDistance(3.5, [2.4, 1.2, 1.8]), 1.04);
+  assert.equal(followCamera.resolveBoomDistance(3.5, [0.1]), 0.02);
+});
+
+test('limits camera collision raycasts to sections intersecting the padded boom bounds', () => {
+  const nearby = { id: 'nearby' };
+  const boundary = { id: 'boundary' };
+  const negative = { id: 'negative' };
+  const far = { id: 'far' };
+  const sections = {
+    '0,0,0': nearby,
+    '16,0,0': boundary,
+    '-16,0,-16': negative,
+    '64,0,64': far,
+  };
+
+  assert.deepEqual(
+    followCamera.selectNearbySectionMeshes(sections, { x: 15.9, y: 8, z: 2 }, { x: 16.1, y: 8, z: 4 }, 0.2)
+      .map((mesh) => (mesh as { id: string }).id)
+      .sort(),
+    ['boundary', 'nearby'],
+  );
+  assert.deepEqual(
+    followCamera.selectNearbySectionMeshes(sections, { x: -0.1, y: 8, z: -0.1 }, { x: 0.1, y: 8, z: 0.1 }, 0.2)
+      .map((mesh) => (mesh as { id: string }).id)
+      .sort(),
+    ['nearby', 'negative'],
+  );
+});
 
 test('renders scripted village dialogue actors with the native villager model in Prismarine Viewer', () => {
   const prismarineRoot = dirname(require.resolve('prismarine-viewer'));
+  const browserEntrySource = readFileSync(join(prismarineRoot, 'lib', 'index.js'), 'utf8');
   const worldViewSource = readFileSync(join(prismarineRoot, 'viewer', 'lib', 'worldView.js'), 'utf8');
   const villagerModels = JSON.parse(readFileSync(join(prismarineRoot, 'viewer', 'lib', 'entity', 'entities.json'), 'utf8'));
   const browserBundle = readFileSync(join(prismarineRoot, 'public', 'index.js'), 'utf8');
 
+  assert.match(browserEntrySource, /const \{ OrbitControls \} = require\('three\/examples\/jsm\/controls\/OrbitControls'\)/);
+  assert.match(browserEntrySource, /new OrbitControls\(viewer\.camera, renderer\.domElement\)/);
+  assert.ok(browserBundle.includes('OrbitControls'));
+  assert.doesNotMatch(browserBundle, /new THREE\.OrbitControls/);
   assert.match(worldViewSource, /\['MiraGardener', 'TobinCart', 'PipBaker'\]\.includes\(e\.username\) \? 'villager' : e\.name/);
   assert.equal(villagerModels.villager.textures.default, 'textures/entity/villager/type/plains');
   assert.ok(browserBundle.includes('"default":"textures/entity/villager/type/plains"'));
+});
+
+test('production postinstall safely skips the viewer patch when webpack is omitted', () => {
+  const scriptPath = join(dirname(new URL(import.meta.url).pathname), '..', 'scripts', 'apply-prismarine-viewer-fix.cjs');
+  const prismarineRoot = dirname(require.resolve('prismarine-viewer'));
+  const result = spawnSync(process.execPath, [scriptPath], {
+    encoding: 'utf8',
+    env: { ...process.env, BOSON_WEBPACK_BIN: join(prismarineRoot, '__webpack_not_installed__') },
+  });
+
+  assert.equal(result.status, 0, result.stderr);
+  assert.match(result.stderr, /Skipping Prismarine Viewer patch: webpack is unavailable/);
 });
 
 test('maps greater explorer distance to lower speech volume and validates dialogue events', () => {
