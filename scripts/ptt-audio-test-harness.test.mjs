@@ -1,6 +1,20 @@
 import assert from 'node:assert/strict';
+import { request as httpRequest } from 'node:http';
 import test from 'node:test';
 import { FIXED_AUTHORED_LINE, FIXED_RESIDENT, startPttAudioHarness } from './ptt-audio-test-harness.mjs';
+
+function requestWithHeaders(url, headers) {
+  return new Promise((resolve, reject) => {
+    const request = httpRequest(url, { headers }, (response) => {
+      let body = '';
+      response.setEncoding('utf8');
+      response.on('data', (chunk) => { body += chunk; });
+      response.on('end', () => resolve({ status: response.statusCode, body }));
+    });
+    request.once('error', reject);
+    request.end();
+  });
+}
 
 test('isolated audio harness serves production modules behind local security and usage caps', async (context) => {
   const harness = await startPttAudioHarness({ port: 0, host: '127.0.0.1', providerEnabled: false });
@@ -186,4 +200,75 @@ test('mocked provider flow discriminates two public intents and caps cumulative 
   await reader.cancel();
   await harness.close();
   assert.equal(globalThis.fetch, originalFetch, 'closing the harness restores the process fetch transport');
+});
+
+test('native speech-to-speech session broker is local-only and keeps the API key server-side', async (context) => {
+  const disabled = await startPttAudioHarness({ providerEnabled: false });
+  context.after(() => disabled.close());
+  const page = await fetch(new URL('/native', disabled.url));
+  assert.equal(page.status, 200);
+  const pageText = await page.text();
+  assert.match(pageText, /Native Higgs Realtime speech-to-speech/);
+  assert.match(pageText, /Hold P to talk/);
+  assert.match(pageText, /chloe/);
+  assert.doesNotMatch(pageText, /two short tests|96 characters|TTS requests/);
+  const topLevelPage = await requestWithHeaders(new URL('/native', disabled.url), {
+    'Sec-Fetch-Mode': 'navigate', 'Sec-Fetch-Dest': 'document', 'Sec-Fetch-Site': 'none',
+  });
+  assert.equal(topLevelPage.status, 200);
+  const untrustedNavigation = await requestWithHeaders(new URL('/native', disabled.url), {
+    Origin: 'chrome-extension://sample',
+    'Sec-Fetch-Mode': 'navigate', 'Sec-Fetch-Dest': 'document', 'Sec-Fetch-Site': 'none',
+  });
+  assert.equal(untrustedNavigation.status, 403);
+  const blockedDetail = untrustedNavigation.body;
+  assert.match(blockedDetail, /host=allowed; origin=other; fetchSite=none; mode=navigate; dest=document/);
+  assert.doesNotMatch(blockedDetail, /chrome-extension/);
+  const forgedHostNavigation = await requestWithHeaders(new URL('/native', disabled.url), {
+    Host: 'attacker.invalid',
+    'Sec-Fetch-Mode': 'navigate', 'Sec-Fetch-Dest': 'document', 'Sec-Fetch-Site': 'none',
+  });
+  assert.equal(forgedHostNavigation.status, 403);
+  assert.match(forgedHostNavigation.body, /host=other/);
+  const denied = await fetch(new URL('/native/session/start', disabled.url), {
+    method: 'POST', headers: { Origin: new URL(disabled.url).origin, 'Sec-Fetch-Site': 'same-origin' },
+  });
+  assert.equal(denied.status, 503);
+  assert.equal((await denied.json()).available, false);
+});
+
+test('native session issues one ephemeral secret per active conversation and permits restart after stop', async (context) => {
+  let calls = 0;
+  const harness = await startPttAudioHarness({
+    mockRealtime: true,
+    realtimeFetcher: async () => {
+      calls += 1;
+      return Response.json({ value: 'bai-eph-native-test', expires_at: Math.floor(Date.now() / 1000) + 300 });
+    },
+  });
+  context.after(() => harness.close());
+  const origin = new URL(harness.url).origin;
+  const headers = { Origin: origin, 'Sec-Fetch-Site': 'same-origin' };
+  const start = () => fetch(new URL('/native/session/start', harness.url), { method: 'POST', headers });
+  const firstResponse = await start();
+  assert.equal(firstResponse.status, 200);
+  const first = await firstResponse.json();
+  assert.equal(first.available, true);
+  assert.equal(first.clientSecret, 'bai-eph-native-test');
+  assert.equal(Object.hasOwn(first, 'apiKey'), false);
+  const overlapping = await start();
+  assert.equal(overlapping.status, 409);
+  assert.equal(calls, 1);
+  const heartbeat = await fetch(new URL(`/native/session/heartbeat?sessionId=${encodeURIComponent(first.sessionId)}`, harness.url), {
+    method: 'POST', headers,
+  });
+  assert.equal(heartbeat.status, 200);
+  assert.deepEqual(await heartbeat.json(), { active: true });
+  const stopped = await fetch(new URL(`/native/session/end?sessionId=${encodeURIComponent(first.sessionId)}`, harness.url), {
+    method: 'POST', headers,
+  });
+  assert.equal(stopped.status, 200);
+  const restarted = await start();
+  assert.equal(restarted.status, 200);
+  assert.equal(calls, 2);
 });

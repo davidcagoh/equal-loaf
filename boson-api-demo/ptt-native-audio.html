@@ -1,0 +1,83 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="color-scheme" content="light">
+  <title>Boson native voice lab</title>
+  <style nonce="__CSP_NONCE__">
+    :root { color-scheme: light; --paper:#f3efe4; --ink:#1e2929; --muted:#596864; --line:#c9c9b9; --signal:#bc4c2e; --good:#286549; --warn:#9b591b; --panel:#fbf9f1; --mono:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace; font-family:Inter,ui-sans-serif,system-ui,-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif; color:var(--ink); background:var(--paper); }
+    * { box-sizing:border-box; }
+    body { margin:0; min-width:320px; background:var(--paper); }
+    main { width:min(1000px,calc(100% - 36px)); margin:0 auto; padding:25px 0 42px; }
+    .masthead { display:flex; justify-content:space-between; align-items:center; gap:18px; border-bottom:1px solid var(--ink); padding-bottom:12px; }
+    .mark,.eyebrow,.micro { font:700 11px/1.3 var(--mono); letter-spacing:.1em; text-transform:uppercase; }
+    .mark { display:flex; align-items:center; gap:10px; }
+    .dot { width:11px; height:11px; border-radius:50%; background:var(--signal); box-shadow:0 0 0 4px #bc4c2e22; }
+    .tag { border:1px solid var(--line); border-radius:999px; padding:7px 10px; color:var(--muted); font:600 10px/1 var(--mono); text-transform:uppercase; }
+    .intro { display:grid; grid-template-columns:1.2fr .8fr; gap:32px; align-items:end; padding:30px 0 22px; }
+    h1 { margin:5px 0 0; font:500 clamp(38px,6vw,64px)/.98 Georgia,"Times New Roman",serif; letter-spacing:-.04em; }
+    .dek { max-width:390px; margin:0; color:var(--muted); font-size:14px; line-height:1.55; }
+    .grid { display:grid; grid-template-columns:1fr 1fr; border-top:1px solid var(--ink); border-bottom:1px solid var(--ink); }
+    section { padding:22px 24px 24px 0; }
+    section+section { border-left:1px solid var(--line); padding:22px 0 24px 24px; }
+    h2 { margin:7px 0 3px; font:500 30px/1.1 Georgia,"Times New Roman",serif; }
+    .role { margin:0; color:var(--muted); font-size:13px; }
+    .facts { margin:18px 0; padding:13px 15px; border-left:3px solid var(--signal); background:#ffffff88; font:italic 17px/1.45 Georgia,serif; }
+    .notice { color:var(--muted); font-size:12px; line-height:1.55; }
+    .actions { display:grid; gap:11px; margin-top:20px; }
+    button { min-height:46px; border:1px solid var(--ink); border-radius:4px; padding:0 14px; font:700 12px/1 var(--mono); letter-spacing:.04em; cursor:pointer; }
+    button:focus-visible,summary:focus-visible { outline:3px solid #087f75; outline-offset:3px; }
+    #start-session { color:var(--paper); background:var(--ink); }
+    #end-session { color:var(--ink); background:transparent; }
+    #talk { min-height:62px; color:white; border:0; background:var(--signal); text-transform:uppercase; letter-spacing:.08em; }
+    button:disabled { cursor:not-allowed; background:#8c9188 !important; color:white !important; }
+    .state { min-height:26px; margin:14px 0 0; color:var(--muted); font:12px/1.5 var(--mono); }
+    .state[data-state="good"] { color:var(--good); }
+    .state[data-state="warn"] { color:var(--warn); }
+    .meters { display:grid; grid-template-columns:1fr 1fr; gap:14px 18px; margin-top:14px; padding-top:15px; border-top:1px solid var(--line); }
+    .meters strong { display:block; margin-top:5px; font:600 15px/1.3 var(--mono); }
+    .footnote { margin-top:14px; color:var(--muted); font:11px/1.5 var(--mono); }
+    a { color:inherit; text-underline-offset:3px; }
+    details { margin-top:18px; border-top:1px solid var(--line); padding-top:12px; }
+    summary { width:fit-content; cursor:pointer; color:var(--muted); font:700 10px/1.4 var(--mono); letter-spacing:.08em; text-transform:uppercase; }
+    #diagnostic-list { margin:12px 0 0; padding-left:20px; color:var(--muted); font:11px/1.5 var(--mono); }
+    .footer { display:flex; justify-content:space-between; gap:16px; margin-top:12px; color:var(--muted); font:10px/1.4 var(--mono); text-transform:uppercase; }
+    @media(max-width:700px) { main{width:min(100% - 28px,600px);padding-top:16px}.intro,.grid{grid-template-columns:1fr}.intro{gap:13px;padding:24px 0 18px}section{padding:18px 0 21px}section+section{border-left:0;border-top:1px solid var(--line);padding:19px 0 21px}.footer{flex-direction:column} }
+  </style>
+</head>
+<body>
+  <main>
+    <header class="masthead"><div class="mark"><span class="dot" aria-hidden="true"></span><span>Boson · native voice lab</span></div><span class="tag">Loopback · no world</span></header>
+    <div class="intro"><div><p class="eyebrow">Persistent Realtime conversation</p><h1>Speak directly with Anna.</h1></div><p class="dek">Native Higgs Realtime speech-to-speech: hold P to speak, release to hear Anna reply in the same session. Her short-term conversation context stays active until you end or restart the session.</p></div>
+    <div class="grid">
+      <section aria-labelledby="resident-title">
+        <p class="eyebrow">Fixed public resident</p>
+        <h2 id="resident-title">Anna</h2><p class="role">Garden helper · voice preset chloe</p>
+        <blockquote class="facts">The garden is growing well today. The east beds need watering.</blockquote>
+        <p class="notice">Anna can talk naturally about these public facts. This isolated prototype gives her no Minecraft tools and cannot change story or world state. It does not keep transcripts.</p>
+        <div class="actions"><button id="start-session" type="button">Start resident session</button><button id="talk" type="button" disabled>Hold P to talk</button><button id="end-session" type="button" disabled>End conversation</button></div>
+        <p id="session-state" class="state" role="status" aria-live="polite">No session. Starting it does not request microphone access.</p>
+        <p id="turn-state" class="state" role="status" aria-live="polite">Microphone released.</p>
+      </section>
+      <section aria-labelledby="usage-title">
+        <p class="eyebrow">Live session</p><h2 id="usage-title">Conversation status</h2>
+        <div class="meters">
+          <div><span class="micro">Session</span><strong id="session-age">Not started</strong></div>
+          <div><span class="micro">Start credential expiry</span><strong id="credential-expiry">Not started</strong></div>
+          <div><span class="micro">Turns</span><strong id="turn-count">0</strong></div>
+          <div><span class="micro">Input audio</span><strong id="input-duration">0:00</strong></div>
+          <div><span class="micro">Output audio</span><strong id="output-duration">0:00</strong></div>
+          <div><span class="micro">Reported audio tokens</span><strong id="audio-tokens">Unavailable</strong></div>
+          <div><span class="micro">Duration estimate</span><strong id="cost-estimate">$0.000000</strong></div>
+        </div>
+        <p id="usage-note" class="footnote">The short-lived credential expires at the displayed time; it is used to open this connection and does not force a client-side stop after connection. The provider may close a live session separately. Duration estimate: $0.0023/min input audio and $0.014/min output audio, based on <a href="https://www.boson.ai/higgs-realtime" target="_blank" rel="noreferrer">Boson’s published Realtime duration rates</a>. Actual billing may differ; token rates may apply.</p>
+        <p id="response-state" class="state" role="status" aria-live="polite">Waiting for a resident session.</p>
+        <details><summary>Technical diagnostics</summary><ul id="diagnostic-list" aria-live="polite"></ul></details>
+      </section>
+    </div>
+    <footer class="footer"><span>Mic opens only while P or the button is held</span><span>Stop ends session context and audio</span></footer>
+  </main>
+  <script type="module" nonce="__CSP_NONCE__" src="/ptt-native-audio.js"></script>
+</body>
+</html>

@@ -11,6 +11,7 @@ import { createHiggsTtsHandler, RESIDENT_VOICES, TTS_CHARACTER_USD } from '../pa
 
 const PROJECT_ROOT = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 const PAGE_PATH = join(PROJECT_ROOT, 'boson-api-demo', 'ptt-audio-test.html');
+const NATIVE_PAGE_PATH = join(PROJECT_ROOT, 'boson-api-demo', 'ptt-native-audio.html');
 const MAX_TEST_TURNS = 2;
 const MAX_HOLD_MS = 30_000;
 const MAX_TTS_REQUESTS = 2;
@@ -66,6 +67,16 @@ function isLocalViewerRequest(request, origins, hosts) {
   return typeof host === 'string' && hosts.has(host)
     && (!origin || origins.has(origin))
     && request.headers['sec-fetch-site'] !== 'cross-site';
+}
+
+function safeNativeNavigationDiagnostics(request, origins, hosts) {
+  const enumValue = (value, allowed) => allowed.includes(value) ? value : 'other';
+  const origin = request.headers.origin;
+  const host = request.headers.host;
+  return `host=${hosts.has(host) ? 'allowed' : 'other'}; origin=${!origin ? 'absent' : origins.has(origin) ? 'allowed' : 'other'}`
+    + `; fetchSite=${enumValue(request.headers['sec-fetch-site'], ['none', 'same-origin', 'same-site', 'cross-site'])}`
+    + `; mode=${enumValue(request.headers['sec-fetch-mode'], ['navigate', 'cors', 'no-cors', 'same-origin'])}`
+    + `; dest=${enumValue(request.headers['sec-fetch-dest'], ['document', 'empty', 'script', 'worker', 'audio'])}`;
 }
 
 function sendIpcAck(socket, value) {
@@ -184,6 +195,7 @@ export async function startPttAudioHarness({ port = 0, host = '127.0.0.1', provi
   let ttsServer;
   let ipcServer;
   let pageTemplate;
+  let nativePageTemplate;
   let httpServer;
   let stopped = false;
   let realtimeTurnsUsed = 0;
@@ -192,6 +204,8 @@ export async function startPttAudioHarness({ port = 0, host = '127.0.0.1', provi
   let mockFetchUsers = 0;
   let mockOriginalFetch;
   let mockFetch;
+  let activeNativeSession = null;
+  let nativeSessionStartInFlight = false;
   const dialogueClients = new Set();
   const dialogueByKey = new Map();
 
@@ -275,11 +289,19 @@ export async function startPttAudioHarness({ port = 0, host = '127.0.0.1', provi
     response.setHeader('Referrer-Policy', 'no-referrer');
     response.setHeader('Cache-Control', 'no-store');
     const isTopLevelNavigation = request.method === 'GET' && request.url?.split('?')[0] === '/'
+      && allowedHosts.has(request.headers.host)
       && request.headers['sec-fetch-mode'] === 'navigate'
       && request.headers['sec-fetch-dest'] === 'document'
       && !request.headers.origin;
-    if (!isLocalViewerRequest(request, viewerOrigins, allowedHosts) && !isTopLevelNavigation) {
-      response.writeHead(403).end('Loopback same-origin requests only.');
+    const isNativeTopLevelNavigation = request.method === 'GET' && pathname === '/native'
+      && allowedHosts.has(request.headers.host)
+      && request.headers['sec-fetch-mode'] === 'navigate'
+      && request.headers['sec-fetch-dest'] === 'document'
+      && !request.headers.origin;
+    if (!isLocalViewerRequest(request, viewerOrigins, allowedHosts) && !isTopLevelNavigation && !isNativeTopLevelNavigation) {
+      const detail = pathname === '/native' && request.method === 'GET'
+        ? ` Safe request metadata: ${safeNativeNavigationDiagnostics(request, viewerOrigins, allowedHosts)}.` : '';
+      response.writeHead(403).end(`Loopback same-origin requests only.${detail}`);
       return;
     }
 
@@ -305,12 +327,108 @@ export async function startPttAudioHarness({ port = 0, host = '127.0.0.1', provi
       return;
     }
 
+    if (request.method === 'GET' && pathname === '/native') {
+      const nonce = randomBytes(18).toString('base64url');
+      response.setHeader('Content-Security-Policy', [
+        "default-src 'none'",
+        `script-src 'self' 'nonce-${nonce}'`,
+        `style-src 'self' 'nonce-${nonce}'`,
+        `connect-src 'self' wss://api.boson.ai`,
+        "worker-src 'self'",
+        "media-src 'self' blob:",
+        "img-src 'self' data:",
+        "object-src 'none'",
+        "base-uri 'none'",
+        "form-action 'self'",
+        "frame-ancestors 'none'",
+      ].join('; '));
+      response.setHeader('Permissions-Policy', 'microphone=(self), camera=(), geolocation=()');
+      response.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8' })
+        .end(nativePageTemplate.replaceAll('__CSP_NONCE__', nonce));
+      return;
+    }
+
+    if (pathname === '/native/session/start' && request.method === 'POST') {
+      if (!isSameOriginPttRequest(request, viewerOrigins)) {
+        json(response, 403, { available: false, error: 'Local same-origin native sessions only.' });
+        return;
+      }
+      if (!providerEnabled || !process.env.BOSON_API_KEY?.trim()) {
+        json(response, 503, { available: false, error: 'Native Boson Realtime is not configured.' });
+        return;
+      }
+      if (activeNativeSession && activeNativeSession.leaseExpiresAt <= Math.floor(Date.now() / 1_000)) activeNativeSession = null;
+      if (activeNativeSession || nativeSessionStartInFlight) {
+        json(response, 409, { available: false, error: 'A resident session is already active.' });
+        return;
+      }
+      const now = Math.floor(Date.now() / 1_000);
+      nativeSessionStartInFlight = true;
+      try {
+        const fetcher = mockRealtime ? realtimeFetcher : globalThis.fetch;
+        const result = await fetcher('https://api.boson.ai/v1/realtime/client_secrets', {
+          method: 'POST',
+          headers: { authorization: `Bearer ${process.env.BOSON_API_KEY}`, 'content-type': 'application/json' },
+          body: JSON.stringify({ expires_after: { seconds: 300 } }),
+          signal: AbortSignal.timeout(8_000),
+        });
+        const payload = await result.json();
+        if (!result.ok || !payload || typeof payload !== 'object'
+          || typeof payload.value !== 'string' || !payload.value.startsWith('bai-eph-')
+          || !Number.isSafeInteger(payload.expires_at) || payload.expires_at <= now) {
+          json(response, 503, { available: false, error: 'Native Boson Realtime could not start.' });
+          return;
+        }
+        const sessionId = randomUUID();
+        activeNativeSession = { sessionId, expiresAt: payload.expires_at, leaseExpiresAt: Math.floor(Date.now() / 1_000) + 60 };
+        json(response, 200, { available: true, sessionId, clientSecret: payload.value, expiresAt: payload.expires_at });
+      } catch {
+        json(response, 503, { available: false, error: 'Native Boson Realtime could not start.' });
+      } finally {
+        nativeSessionStartInFlight = false;
+      }
+      return;
+    }
+
+    if (pathname === '/native/session/heartbeat' && request.method === 'POST') {
+      if (!isSameOriginPttRequest(request, viewerOrigins)) {
+        json(response, 403, { active: false });
+        return;
+      }
+      const sessionId = url.searchParams.get('sessionId');
+      const now = Math.floor(Date.now() / 1_000);
+      if (activeNativeSession && activeNativeSession.leaseExpiresAt <= now) activeNativeSession = null;
+      if (!activeNativeSession || activeNativeSession.sessionId !== sessionId) {
+        json(response, 404, { active: false });
+        return;
+      }
+      activeNativeSession.leaseExpiresAt = now + 60;
+      json(response, 200, { active: true });
+      return;
+    }
+
+    if (pathname === '/native/session/end' && request.method === 'POST') {
+      if (!isSameOriginPttRequest(request, viewerOrigins)) {
+        json(response, 403, { ended: false });
+        return;
+      }
+      const sessionId = url.searchParams.get('sessionId');
+      if (!activeNativeSession || activeNativeSession.sessionId !== sessionId) {
+        json(response, 404, { ended: false });
+        return;
+      }
+      activeNativeSession = null;
+      json(response, 200, { ended: true });
+      return;
+    }
+
     const assets = new Map([
       ['/boson-ptt.js', new URL('../packages/minecraft/src/viewer-ptt.js', import.meta.url)],
       ['/village-vocabulary.js', new URL('../packages/minecraft/src/village-vocabulary.js', import.meta.url)],
       ['/boson-ptt-worklet.js', new URL('../packages/minecraft/src/viewer-ptt-worklet.js', import.meta.url)],
       ['/boson-audio.js', new URL('../packages/minecraft/src/viewer-audio.js', import.meta.url)],
       ['/ptt-audio-test-view.js', new URL('../boson-api-demo/ptt-audio-test-view.js', import.meta.url)],
+      ['/ptt-native-audio.js', new URL('../boson-api-demo/ptt-native-audio.js', import.meta.url)],
       ['/audio/spatial-voice-mixer.js', new URL('../packages/minecraft/src/audio/spatial-voice-mixer.js', import.meta.url)],
     ]);
     if (request.method === 'GET' && assets.has(pathname)) {
@@ -393,6 +511,7 @@ export async function startPttAudioHarness({ port = 0, host = '127.0.0.1', provi
 
   try {
     pageTemplate = await readFile(PAGE_PATH, 'utf8');
+    nativePageTemplate = await readFile(NATIVE_PAGE_PATH, 'utf8');
     ipcServer = createFixedFixtureIpc(socketPath, onComplete);
     await new Promise((resolveListen, rejectListen) => {
       ipcServer.once('listening', resolveListen);
