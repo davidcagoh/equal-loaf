@@ -41,7 +41,8 @@ import {
 import { createEqualLoafState } from './village-short-scene.ts';
 import { completeEqualLoafPttTurn } from './village-ptt-scene-integration.ts';
 import { projectCompletedResidentSpeech, type NativeSpeechPositionSample } from './village-spoken-perception.ts';
-import { projectCompletedPlayerSpeech, type NativePlayerSpeechPositionSample } from './village-player-speech-perception.ts';
+import type { NativePlayerSpeechPositionSample } from './village-player-speech-perception.ts';
+import { NativePlayerSpeechHandler, type NativePlayerSpeechTurn } from './village-native-player-speech-handler.ts';
 import { VillageHeardSpeechMemory } from './village-heard-speech-memory.ts';
 import { equalLoafResidentFact } from './native-resident-context.ts';
 
@@ -65,18 +66,14 @@ const spawned = new Set<string>();
 const homePositions = new Map<string, { x: number; y: number; z: number }>();
 const lastWatchTurnAt = new Map<string, number>();
 const awarenessTimers: ReturnType<typeof setInterval>[] = [];
-interface ActivePttTurn {
+interface ActivePttTurn extends NativePlayerSpeechTurn {
   turnId: string;
   residentId: string;
   residentSessionId?: string;
   startedAt: number;
   expiresAt: number;
   beginAck: VillagePttAck;
-  playerSpeechSamples?: NativePlayerSpeechPositionSample[];
   playerSpeechTimer?: ReturnType<typeof setInterval>;
-  playerSpeechSamplingComplete?: boolean;
-  playerSpeechItems?: Array<{ itemId: string; transcript: string }>;
-  playerSpeechItemIds?: Set<string>;
 }
 interface ActiveNativeSpeech {
   turnId: string;
@@ -92,8 +89,8 @@ const activePttTurns = new Map<string, ActivePttTurn>();
 const resolvedPttTurns = new Map<string, 'cancelled' | 'completed' | 'expired'>();
 const activeNativeSpeech = new Map<string, ActiveNativeSpeech>();
 const consumedNativeSpeechResponseIds = new Map<string, Set<string>>();
-const consumedPlayerSpeechItemIds = new Map<string, Set<string>>();
 const heardSpeechMemory = new VillageHeardSpeechMemory(3, 180_000);
+const nativePlayerSpeechHandler = new NativePlayerSpeechHandler(heardSpeechMemory);
 const heardSpeechMemoryPruner = setInterval(() => heardSpeechMemory.prune(), 1_000);
 heardSpeechMemoryPruner.unref();
 const cognitionState = { current: createVillageCognitionState() };
@@ -104,7 +101,6 @@ const NATIVE_PTT_TURN_TTL_MS = 120_000;
 const MAX_ACTIVE_PTT_TURNS = 8;
 const MAX_ACTIVE_NATIVE_SPEECH = 8;
 const MAX_NATIVE_SPEECH_SAMPLES = 500;
-const MAX_PLAYER_SPEECH_ITEMS_PER_TURN = 8;
 const NATIVE_SPEECH_SAMPLE_INTERVAL_MS = 250;
 const ai = new VillageAi({ enabled: process.env.BOSON_VILLAGE_AI === '1', jevKey: process.env.TYPESAFE_API_KEY, gatewayKey: process.env.AI_GATEWAY_API_KEY });
 const plannedLineIds = new Map<string, string>();
@@ -400,37 +396,12 @@ function finishNativeSpeech(command: Extract<VillagePttCommand, { type: 'ptt.spe
 function finishPlayerSpeech(command: Extract<VillagePttCommand, { type: 'ptt.player.speech.finish' }>): void {
   prunePttTurns();
   const turn = activePttTurns.get(command.turnId);
-  if (!turn || turn.residentSessionId !== command.residentSessionId) {
-    sendNativeAck('ptt.player.speech.ack', command.turnId, 'no_session', { itemId: command.itemId });
-    return;
-  }
-  const itemIds = turn.playerSpeechItemIds ?? new Set<string>();
-  turn.playerSpeechItemIds = itemIds;
-  if (itemIds.has(command.itemId)) {
-    sendNativeAck('ptt.player.speech.ack', command.turnId, 'duplicate', { itemId: command.itemId });
-    return;
-  }
-  if ((turn.playerSpeechItems?.length ?? 0) >= MAX_PLAYER_SPEECH_ITEMS_PER_TURN) {
-    sendNativeAck('ptt.player.speech.ack', command.turnId, 'too_many', { itemId: command.itemId });
-    return;
-  }
-  turn.playerSpeechItems = [...(turn.playerSpeechItems ?? []), { itemId: command.itemId, transcript: command.transcript }];
-  itemIds.add(command.itemId);
-  sendNativeAck('ptt.player.speech.ack', command.turnId, 'queued', { itemId: command.itemId });
+  const status = nativePlayerSpeechHandler.finish(turn, command);
+  sendNativeAck('ptt.player.speech.ack', command.turnId, status, { itemId: command.itemId });
 }
 
 function finishQueuedPlayerSpeech(turn: ActivePttTurn): void {
-  if (!turn.playerSpeechSamplingComplete || !turn.residentSessionId) return;
-  const consumedItemIds = consumedPlayerSpeechItemIds.get(turn.residentSessionId) ?? new Set<string>();
-  consumedPlayerSpeechItemIds.set(turn.residentSessionId, consumedItemIds);
-  for (const item of turn.playerSpeechItems ?? []) {
-    const event = projectCompletedPlayerSpeech({
-      session: { turnId: turn.turnId, sessionId: turn.residentSessionId, itemId: item.itemId },
-      report: { turnId: turn.turnId, sessionId: turn.residentSessionId, itemId: item.itemId, transcript: item.transcript },
-      samples: turn.playerSpeechSamples ?? [], consumedItemIds,
-    });
-    if (event) rememberHeardSpeech(event, 'the player');
-  }
+  nativePlayerSpeechHandler.complete(turn);
 }
 
 function endNativeTurn(command: Extract<VillagePttCommand, { type: 'ptt.native.end' }>): void {
@@ -743,7 +714,7 @@ function stop(): void {
   for (const speech of activeNativeSpeech.values()) clearInterval(speech.timer);
   activeNativeSpeech.clear();
   consumedNativeSpeechResponseIds.clear();
-  consumedPlayerSpeechItemIds.clear();
+  nativePlayerSpeechHandler.clear();
   heardSpeechMemory.clear();
   clearInterval(heardSpeechMemoryPruner);
   for (const timer of awarenessTimers) clearInterval(timer);
