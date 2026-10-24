@@ -34,6 +34,7 @@ read -r -p 'Press Enter when you are ready to record; the microphone and screen 
 
 ffmpeg -hide_banner \
   -f avfoundation \
+  -pixel_format uyvy422 \
   -framerate 30 \
   -capture_cursor 1 \
   -capture_mouse_clicks 1 \
