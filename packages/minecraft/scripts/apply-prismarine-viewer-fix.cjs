@@ -101,6 +101,36 @@ replaceExpected(
   'if (firstPositionUpdate) {'
 )
 replaceExpected(
+  'lib/index.js',
+  'let firstPositionUpdate = true\n',
+  'let firstPositionUpdate = true\nlet followPosition\n'
+)
+replaceExpected(
+  'lib/index.js',
+  "      controls.update()\n      firstPositionUpdate = false\n    }\n    if (addMesh) {",
+  "      controls.update()\n      firstPositionUpdate = false\n    } else if (followPosition) {\n      const dx = pos.x - followPosition.x\n      const dy = pos.y - followPosition.y\n      const dz = pos.z - followPosition.z\n      viewer.camera.position.x += dx\n      viewer.camera.position.y += dy\n      viewer.camera.position.z += dz\n      controls.target.x += dx\n      controls.target.y += dy\n      controls.target.z += dz\n      controls.update()\n    }\n    followPosition = { x: pos.x, y: pos.y, z: pos.z }\n    if (addMesh) {"
+)
+replaceExpected(
+  'public/index.js',
+  'if(s&&(h.target.set(t.x,t.y,t.z),u.camera.position.set(t.x,t.y+20,t.z+20),h.update(),s=!1),i){',
+  'if(s){h.target.set(t.x,t.y,t.z),u.camera.position.set(t.x,t.y+20,t.z+20),h.update(),f={x:t.x,y:t.y,z:t.z},s=!1}else if(f){const e=t.x-f.x,n=t.y-f.y,r=t.z-f.z;u.camera.position.x+=e,u.camera.position.y+=n,u.camera.position.z+=r,h.target.x+=e,h.target.y+=n,h.target.z+=r,h.update()}f={x:t.x,y:t.y,z:t.z};if(i){'
+)
+replaceExpected(
+  'public/index.js',
+  'let e;s=!0,u.listen(o),o.on("position"',
+  'let e,f;s=!0,u.listen(o),o.on("position"'
+)
+replaceExpected(
+  'public/index.html',
+  '      canvas {\n',
+  '      .camera-help {\n        position: fixed;\n        z-index: 1;\n        left: 16px;\n        bottom: 16px;\n        padding: 10px 14px;\n        border: 1px solid rgba(255,255,255,.18);\n        border-radius: 8px;\n        background: rgba(15,23,42,.82);\n        color: #f8fafc;\n        font: 13px/1.4 system-ui, sans-serif;\n        pointer-events: none;\n      }\n\n      canvas {\n'
+)
+replaceExpected(
+  'public/index.html',
+  '  <body>\n',
+  '  <body>\n    <div class="camera-help" role="status">Drag to look · scroll to zoom · right-drag to pan</div>\n'
+)
+replaceExpected(
   'lib/mineflayer.js',
   "    bot.on('move', botPosition)\n    worldView.listenToBot(bot)",
   "    bot.on('move', botPosition)\n    botPosition()\n    worldView.listenToBot(bot)"
@@ -129,10 +159,10 @@ replaceExpected(
   'removeColumn(t,e){delete this.loadedChunks[`${t},${e}`];for(const i of this.workers)i.postMessage({type:"unloadChunk",x:t,z:e});for(let i=0;i<256;i+=16){',
   'removeColumn(t,e){delete this.loadedChunks[`${t},${e}`];let{minY:o=0,worldHeight:a=256}=this.chunkHeightRanges[`${t},${e}`]||{};delete this.chunkHeightRanges[`${t},${e}`];for(const i of this.workers)i.postMessage({type:"unloadChunk",x:t,z:e});for(let i=o;i<o+a;i+=16){'
 )
-replaceExpected(
+replaceAnyExpected(
   'public/index.js',
-  'if(t.y>0&&s&&',
-  'if(s&&'
+  ['if(t.y>0&&s&&', 'if(s&&'],
+  'if(s){'
 )
 replaceExpected(
   'public/index.js',
