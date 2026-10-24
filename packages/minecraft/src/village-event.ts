@@ -47,7 +47,8 @@ export interface VillagePttBeginContext {
 
 export type VillagePttAck =
   | { version: 1; type: 'ptt.ack'; phase: 'begin'; turnId: string; status: 'ready'; resident: VillagePttBeginContext }
-  | { version: 1; type: 'ptt.ack'; phase: 'begin'; turnId: string; status: 'no_resident' | 'expired' | 'duplicate' | 'unavailable' }
+  | { version: 1; type: 'ptt.ack'; phase: 'begin'; turnId: string; status: 'no_resident'; guidance?: string }
+  | { version: 1; type: 'ptt.ack'; phase: 'begin'; turnId: string; status: 'expired' | 'duplicate' | 'unavailable' }
   | { version: 1; type: 'ptt.ack'; phase: 'cancel'; turnId: string; status: 'cancelled' | 'expired' | 'duplicate' | 'no_session' | 'unavailable' }
   | { version: 1; type: 'ptt.ack'; phase: 'complete'; turnId: string; status: 'accepted' | 'fallback'; residentId: string; speakerName: string; lineId: string; eventId: string }
   | { version: 1; type: 'ptt.ack'; phase: 'complete'; turnId: string; status: 'rejected' | 'expired' | 'duplicate' | 'no_session' | 'unavailable' };

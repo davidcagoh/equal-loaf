@@ -280,7 +280,10 @@ export function createPttServer(port: number): PttServer {
       const ack = await requestVillageIpc({ version: 1, type: 'ptt.begin', turnId, at: Date.now() });
       if (!isPttBeginAck(ack, turnId)) {
         if (ack.status === 'no_resident') {
-          respond(response, 409, { available: false, error: 'No villager is close enough to hear you.' });
+          const guidance = safeString(ack.guidance, 240)
+            ? ack.guidance
+            : 'No resident is within 8 blocks. Walk toward a villager and try again when you are closer.';
+          respond(response, 409, { available: false, error: guidance });
           return;
         }
         respond(response, 503, { available: false, error: 'A nearby villager is unavailable; local village audio remains available.' });

@@ -29,6 +29,14 @@ import { villageDialogue, villageMysteryDialogue, villageProfiles } from './vill
 import { createAmbientUtteranceObservation, nextResidentDialogueTurn, type ResidentDialogueCursor } from './village-dialogue-scheduler.ts';
 import { createRoutineWorldObservation } from './village-observations.ts';
 import { distance3d, isWithinExplorerWatchRange, shouldPauseForExplorer, VillageAi } from './village-ai.ts';
+import {
+  createNoResidentGuidance,
+  getCurrentRoutineStopId,
+  getResidentsWithinHearingRadius,
+  getRoutineStopPosition,
+  selectPttResident,
+  type EncounterResident,
+} from './village-encounters.ts';
 
 // Optional explicit env file keeps credentials in the local launcher process only.
 if (process.env.BOSON_AI_ENV_FILE) process.loadEnvFile(process.env.BOSON_AI_ENV_FILE);
@@ -53,7 +61,6 @@ const awarenessTimers: ReturnType<typeof setInterval>[] = [];
 const activePttTurns = new Map<string, { residentId: string; startedAt: number; expiresAt: number; beginAck: VillagePttAck }>();
 const resolvedPttTurns = new Map<string, 'cancelled' | 'completed' | 'expired'>();
 const cognitionState = { current: createVillageCognitionState() };
-const PLAYER_RESPONSE_RADIUS = 8;
 const RESIDENT_HEARING_RADIUS = 12;
 const PTT_TURN_TTL_MS = 30_000;
 const MAX_ACTIVE_PTT_TURNS = 8;
@@ -103,20 +110,28 @@ function currentRoutineStop(residentId: string): string {
   const home = homePositions.get(residentId);
   const profile = villageProfiles.find(({ id }) => id === residentId);
   if (!bot?.entity || !home || !profile) return profile?.routine[0]?.id ?? 'market-well';
-  const position = bot.entity.position;
-  const nearest = profile.routine.map((stopAt) => {
-    const [offsetX, offsetZ] = stopAt.offset;
-    const target = { x: home.x + offsetX, y: home.y, z: home.z + offsetZ };
-    return { id: stopAt.id, distance: distance3d(position, target) };
-  }).sort((left, right) => left.distance - right.distance || left.id.localeCompare(right.id))[0];
-  return nearest?.id ?? profile.routine[0]?.id ?? 'market-well';
+  return getCurrentRoutineStopId(home, profile.routine, bot.entity.position) ?? profile.routine[0]?.id ?? 'market-well';
+}
+
+function currentEncounterResidents(): EncounterResident[] {
+  return villageProfiles.flatMap(({ id, username }) => {
+    const bot = bots.get(id);
+    return bot?.entity ? [{
+      residentId: id,
+      name: username,
+      position: { x: bot.entity.position.x, y: bot.entity.position.y, z: bot.entity.position.z },
+      locationId: currentRoutineStop(id),
+    }] : [];
+  });
 }
 
 function freshPttBeginContext(residentId: string, locationId: string): VillagePttBeginContext | null {
   const profile = villageProfiles.find(({ id }) => id === residentId);
   const state = cognitionState.current;
   if (!profile || !state.residents[residentId]) return null;
-  const knowledge = getResidentKnowledgeContext(state, residentId);
+  const knowledge = getResidentKnowledgeContext(state, residentId, {
+    residentId, playerIntent: 'greet', topic: 'general', locationId, tick: Date.now(),
+  });
   if (knowledge.responseOptions.length === 0) return null;
   return {
     id: profile.id,
@@ -166,19 +181,19 @@ function beginPttTurn(command: Extract<VillagePttCommand, { type: 'ptt.begin' }>
   }
   const explorer = currentExplorerPosition();
   const now = Date.now();
-  const nearest = explorer ? residentDistances(explorer).find(({ residentId, distance }) => {
-    if (distance > PLAYER_RESPONSE_RADIUS) return false;
-    const locationId = currentRoutineStop(residentId);
-    return Boolean(selectResidentIntent(cognitionState.current, {
-      residentId, playerIntent: 'greet', topic: 'general', locationId, tick: now,
-    }, now >>> 0));
-  }) : undefined;
+  const residents = currentEncounterResidents();
+  const canRespond = ({ residentId, locationId }: EncounterResident): boolean => Boolean(selectResidentIntent(cognitionState.current, {
+    residentId, playerIntent: 'greet', topic: 'general', locationId, tick: now,
+  }, now >>> 0));
+  const nearest = explorer ? selectPttResident(explorer, residents, canRespond) : undefined;
   if (!nearest) {
-    sendPttAck({ version: 1, type: 'ptt.ack', phase: 'begin', turnId: command.turnId, status: 'no_resident' });
+    const guidance = explorer ? createNoResidentGuidance(explorer, residents, canRespond)
+      : 'No resident is available yet. Wait for the village to load, then approach a resident within 8 blocks.';
+    sendPttAck({ version: 1, type: 'ptt.ack', phase: 'begin', turnId: command.turnId, status: 'no_resident', guidance });
     return;
   }
-  const locationId = currentRoutineStop(nearest.residentId);
-  const resident = freshPttBeginContext(nearest.residentId, locationId);
+  const locationId = nearest.resident.locationId;
+  const resident = freshPttBeginContext(nearest.resident.residentId, locationId);
   if (!resident) {
     sendPttAck({ version: 1, type: 'ptt.ack', phase: 'begin', turnId: command.turnId, status: 'no_resident' });
     return;
@@ -279,9 +294,7 @@ function completePttTurn(command: Extract<VillagePttCommand, { type: 'ptt.comple
     'garden',
     now,
   );
-  const nearbyResidentIds = residentDistances(explorer)
-    .filter(({ distance }) => distance <= RESIDENT_HEARING_RADIUS)
-    .map(({ residentId }) => residentId);
+  const nearbyResidentIds = getResidentsWithinHearingRadius(explorer, currentEncounterResidents());
   const playerObservation: VillageObservation = {
     type: 'player.intent',
     eventId: command.turnId,
@@ -460,10 +473,8 @@ async function runResidentRoutine(profile: typeof villageProfiles[number], index
       await wait(profile.pauseMs);
       continue;
     }
-    const [offsetX, offsetZ] = stopAt.offset;
-    const x = home.x + offsetX;
-    const y = home.y;
-    const z = home.z + offsetZ;
+    const target = getRoutineStopPosition(home, stopAt);
+    const { x, y, z } = target;
     const explorer = explorerFor(bot);
     if (explorer && shouldPauseForExplorer(distance3d({ x, y, z }, explorer.position))) {
       await wait(2_000);

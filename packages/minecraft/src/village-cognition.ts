@@ -172,6 +172,14 @@ const AUTHORED_BEATS: readonly AuthoredBeat[] = [
     action: { kind: 'idle' }, lineId: 'mira-heard-garden-help',
   },
   {
+    id: 'mira-routine-greeting', residentId: 'mira', priority: 10,
+    requiredIntent: ['greet'], requiredTopics: ['general'],
+    requiredLocation: '*', requiredFactIds: [], minimumTrust: 0,
+    cooldownTicks: RESPONSE_COOLDOWN_TICKS, expiresInTicks: 5_000, modelSelectableLine: true,
+    lineSummary: 'A brief everyday greeting while Anna is making her rounds.',
+    action: { kind: 'look_at_player' }, lineId: 'mira-routine-greeting',
+  },
+  {
     id: 'tobin-guarded-route-reply', residentId: 'tobin', priority: 20,
     requiredIntent: ['greet', 'ask_about_known_topic', 'ask_for_help'], requiredTopics: ['general', 'route'],
     requiredLocation: 'map-board', requiredFactIds: [], minimumTrust: 0,
@@ -180,12 +188,28 @@ const AUTHORED_BEATS: readonly AuthoredBeat[] = [
     action: { kind: 'continue_routine', waypointId: 'map-board' }, lineId: 'tobin-guarded-route-reply',
   },
   {
+    id: 'tobin-routine-greeting', residentId: 'tobin', priority: 10,
+    requiredIntent: ['greet'], requiredTopics: ['general'],
+    requiredLocation: '*', requiredFactIds: [], minimumTrust: 0,
+    cooldownTicks: RESPONSE_COOLDOWN_TICKS, expiresInTicks: 5_000, modelSelectableLine: true,
+    lineSummary: 'A brief everyday greeting while James is checking the village paths.',
+    action: { kind: 'look_at_player' }, lineId: 'tobin-routine-greeting',
+  },
+  {
     id: 'pip-guarded-bakery-reply', residentId: 'pip', priority: 20,
     requiredIntent: ['greet', 'ask_about_known_topic', 'ask_for_help'], requiredTopics: ['general', 'bakery'],
     requiredLocation: 'bakery-hearth', requiredFactIds: [], minimumTrust: 0,
     cooldownTicks: 3_000, expiresInTicks: 5_000, modelSelectableLine: true,
     lineSummary: 'A warm, brief response focused on bakery work.',
     action: { kind: 'continue_routine', waypointId: 'bakery-hearth' }, lineId: 'pip-guarded-bakery-reply',
+  },
+  {
+    id: 'pip-routine-greeting', residentId: 'pip', priority: 10,
+    requiredIntent: ['greet'], requiredTopics: ['general'],
+    requiredLocation: '*', requiredFactIds: [], minimumTrust: 0,
+    cooldownTicks: RESPONSE_COOLDOWN_TICKS, expiresInTicks: 5_000, modelSelectableLine: true,
+    lineSummary: 'A brief everyday greeting while Thomas walks between the bakery and market.',
+    action: { kind: 'look_at_player' }, lineId: 'pip-routine-greeting',
   },
   {
     id: 'pip-heard-route-from-tobin', residentId: 'pip', priority: 30,
@@ -202,8 +226,11 @@ const AUTHORED_LINES = Object.freeze({
   'mira-guarded-garden-reply': 'The seedlings are safer uphill. I have work to finish before we talk more.',
   'mira-garden-help-reply': 'I could use help checking the seedlings. Stay on the garden path, please.',
   'mira-heard-garden-help': 'You asked about helping in the garden earlier. I could use another pair of hands checking the seedlings.',
+  'mira-routine-greeting': 'Hello. I’m checking the garden and seed beds as I make my rounds.',
   'tobin-guarded-route-reply': 'The map shows the route. It does not tell me who drove the cart.',
+  'tobin-routine-greeting': 'Hello. I’m checking the paths and updating my village map.',
   'pip-guarded-bakery-reply': 'The oven needs watching. There is warm bread when the work is done.',
+  'pip-routine-greeting': 'Hello. I’m on my way between the bakery and the village market.',
   'pip-heard-route-from-tobin': 'Tobin marked a flour cart path on his map. I heard him say it, but I have not checked that route myself.',
 } as const);
 
@@ -315,7 +342,7 @@ export function getResidentKnowledgeContext(
     .filter((beat) => beat.residentId === residentId && beat.modelSelectableLine && beat.requiredFactIds.every((factId) => factIds.includes(factId)) &&
       (!beat.requiredHeardClaim || hasHeardClaim(resident, beat.requiredHeardClaim, scene?.heardClaimEventId)) &&
       (!beat.requiredHeardPlayerIntent || hasHeardPlayerIntent(resident, beat.requiredHeardPlayerIntent, scene)) &&
-      (!beat.requiredHeardClaim || !scene || scene.locationId === beat.requiredLocation))
+      (!scene || beat.requiredLocation === '*' || scene.locationId === beat.requiredLocation))
     .map(({ lineId, lineSummary, requiredIntent, requiredTopics }) => ({
       lineId, summary: lineSummary, allowedIntents: requiredIntent, topics: requiredTopics,
     }));
@@ -428,7 +455,7 @@ function eligibleBeats(state: VillageCognitionState, context: ResidentIntentCont
     const lastCompleted = resident.completedBeatTicks[beat.id];
     return beat.residentId === context.residentId &&
       beat.requiredIntent.includes(context.playerIntent) && beat.requiredTopics.includes(context.topic) &&
-      beat.requiredLocation === context.locationId && beat.minimumTrust <= resident.trust &&
+      (beat.requiredLocation === '*' || beat.requiredLocation === context.locationId) && beat.minimumTrust <= resident.trust &&
       beat.requiredFactIds.every((factId) => resident.knownFactIds.includes(factId)) &&
       (!beat.requiredHeardClaim || hasHeardClaim(resident, beat.requiredHeardClaim, context.heardClaimEventId)) &&
       (!beat.requiredHeardPlayerIntent || hasHeardPlayerIntent(resident, beat.requiredHeardPlayerIntent, context)) &&

@@ -143,9 +143,14 @@ test('HTTP begin and complete carry a safe choice over UDS and resolve private s
     });
     const setup = await response.json() as Record<string, unknown>;
     assert.equal(response.status, 200);
-    assert.deepEqual(setup.allowedLineIds, ['mira-guarded-garden-reply', 'mira-garden-help-reply']);
+    assert.deepEqual(setup.allowedLineIds, [
+      'mira-guarded-garden-reply',
+      'mira-garden-help-reply',
+      'mira-routine-greeting',
+    ]);
     assert.equal(setup.available, true);
     assert.equal(JSON.stringify(setup).includes('mira-sighting'), false);
+    assert.equal(JSON.stringify(setup).includes('mira-sighting-disclosure'), false);
     assert.equal(providerCalls, 1);
 
     const completed = await originalFetch(`${origin}/boson-ptt/complete`, {
