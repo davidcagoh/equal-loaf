@@ -46,7 +46,14 @@ export function startViewerAudio() {
   let paused = false;
   let explorer = null;
   let pendingEvent = null;
-  const voices = () => speechSupported ? synth.getVoices().filter((voice) => voice.lang) : [];
+  let activeUtterance = null;
+  const voices = () => {
+    if (!speechSupported) return [];
+    const available = synth.getVoices().filter((voice) => voice.lang);
+    const language = (document.documentElement.lang || window.navigator.language || '').split('-')[0].toLowerCase();
+    const matching = available.filter((voice) => voice.lang.split('-')[0].toLowerCase() === language);
+    return matching.length ? matching : available;
+  };
   if (!speechSupported) status.textContent = 'Browser speech synthesis is unavailable';
   const hash = (text) => [...text].reduce((value, char) => ((value * 31) + char.charCodeAt(0)) >>> 0, 7);
   const positionSocket = window.io?.();
@@ -68,16 +75,34 @@ export function startViewerAudio() {
     pendingEvent = null;
     const volume = volumeForDistance(distanceBetween(explorer, event.position));
     if (volume <= 0) return;
+    activeUtterance = null;
     synth.cancel();
     const utterance = new window.SpeechSynthesisUtterance(event.line);
     const available = voices();
     utterance.voice = available[hash(event.speakerId) % available.length] ?? null;
+    utterance.lang = utterance.voice?.lang || window.navigator.language;
     utterance.volume = volume;
     utterance.pitch = 0.85 + (hash(event.speakerId) % 50) / 100;
     utterance.rate = 0.92 + (hash(event.speakerId + 'rate') % 17) / 100;
-    utterance.onstart = () => { status.textContent = `Speaking · nearby volume ${Math.round(volume * 100)}%`; };
-    utterance.onend = () => { status.textContent = 'Ready'; };
-    utterance.onerror = () => { status.textContent = 'Speech playback failed'; };
+    const voiceName = utterance.voice?.name ?? 'Default voice';
+    const distanceVolume = Math.round(volume * 100);
+    activeUtterance = utterance;
+    status.textContent = `Queued · ${voiceName} · distance volume ${distanceVolume}%`;
+    utterance.onstart = () => {
+      if (activeUtterance === utterance) status.textContent = `Speaking · ${voiceName} · distance volume ${distanceVolume}%`;
+    };
+    utterance.onend = () => {
+      if (activeUtterance === utterance) {
+        activeUtterance = null;
+        status.textContent = 'Ready';
+      }
+    };
+    utterance.onerror = () => {
+      if (activeUtterance === utterance) {
+        activeUtterance = null;
+        status.textContent = 'Speech playback failed';
+      }
+    };
     synth.speak(utterance);
   };
 
@@ -103,6 +128,7 @@ export function startViewerAudio() {
     if (paused) synth.pause();
     else if (pendingEvent) {
       synth.cancel();
+      synth.resume();
       const latest = pendingEvent;
       pendingEvent = null;
       speak(latest);
@@ -112,6 +138,7 @@ export function startViewerAudio() {
   });
   panel.querySelector('#boson-stop').addEventListener('click', () => {
     synth?.cancel();
+    activeUtterance = null;
     paused = false;
     pendingEvent = null;
     panel.querySelector('#boson-pause').textContent = 'Pause';
