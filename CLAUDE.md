@@ -74,4 +74,7 @@ _Add a brief overview of your project architecture_
 
 ## Conventions & Patterns
 
-_Add your project-specific conventions here_
+
+### Task Completion Commit
+
+For each successfully completed Beads task, verify the task-specific changes, stage only those files, and commit locally before closing the Beads issue. Check the staged diff to prevent unrelated or pre-existing changes from entering the commit. Include the Beads issue ID in the commit subject. Do not push or sync unless separately authorized. If there are no file changes, record the successful outcome in Beads and close the task without creating an empty commit.
