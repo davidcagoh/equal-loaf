@@ -32,6 +32,15 @@ test('global active limit spans residents and frees capacity on release', () => 
   assert.equal(policy.takeNextAny(102)?.residentId, 'tobin');
 });
 
+test('does not dispatch a resident currently handling player PTT', () => {
+  const policy = new ResidentNativeReactionPolicy();
+  policy.enqueue({ eventId: 'mira_routine', residentId: 'mira', kind: 'routine', at: 100, activity: 'walking', motivation: 'visit neighbors' });
+  policy.enqueue({ eventId: 'tobin_routine', residentId: 'tobin', kind: 'routine', at: 100, activity: 'walking', motivation: 'visit neighbors' });
+
+  assert.equal(policy.takeNextAny(101, new Set(['mira']))?.residentId, 'tobin');
+  assert.equal(policy.activeCount, 1);
+});
+
 test('causal depth, self-hearing, dedupe, pending expiry, and active expiry stay bounded', () => {
   const policy = new ResidentNativeReactionPolicy({ eventTtlMs: 1_000 });
   const heard = {
