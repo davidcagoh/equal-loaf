@@ -104,7 +104,7 @@ stop_children() {
   cleaning_up=true
   trap - EXIT INT TERM
   local pid attempt running
-  for pid in "${child_pids[@]}"; do kill -INT "$pid" 2>/dev/null || true; done
+  for pid in "${child_pids[@]}"; do kill -TERM "$pid" 2>/dev/null || true; done
   for attempt in {1..30}; do
     running=false
     for pid in "${child_pids[@]}"; do
@@ -114,9 +114,7 @@ stop_children() {
     sleep 1
   done
   if [[ "$running" == true ]]; then
-    echo "Some local processes are still stopping; sending TERM." >&2
-    for pid in "${child_pids[@]}"; do job_running "$pid" && kill -TERM "$pid" 2>/dev/null || true; done
-    sleep 2
+    echo "Some local processes are still stopping; sending KILL." >&2
     for pid in "${child_pids[@]}"; do job_running "$pid" && kill -KILL "$pid" 2>/dev/null || true; done
   fi
   for pid in "${child_pids[@]}"; do wait "$pid" 2>/dev/null || true; done
