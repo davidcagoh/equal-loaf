@@ -10,6 +10,20 @@ The world bootstrap targets Minecraft Java 1.21.11, which is on Mineflayer's tes
 4. Run `bash scripts/start-minecraft-world.sh`. The server listens only on `127.0.0.1`, uses offline mode for this local test, peaceful difficulty, and a pinned seed. Do not expose this server to a network.
 5. Stop the foreground server with Ctrl+C. Run `bash scripts/reset-minecraft-world.sh` to restore the canonical settings and move the prior world into a timestamped backup.
 
+## One-command village demo
+
+After the server jar, Java 21+, and `packages/minecraft` dependencies are already prepared, start the complete local village with:
+
+```sh
+bash scripts/start-village-demo.sh
+```
+
+Open the printed `http://127.0.0.1:3000/` link and select **Enable audio**. The viewer is attached directly to the account-free `DemoPlayer`, which strolls gently through resident waypoints. NPC dialogue reaches that viewer over its local event stream; proximity volume uses the live explorer position, and speech uses the browser's local voices. Give the simulator a moment to pathfind between its stops. Press Ctrl+C in the launcher terminal to stop the Minecraft server, companion, explorer, village simulator, and dialogue relay.
+
+The launcher does not prepare or download server files, edit EULA acceptance, start the API demo, or use the microphone. It reads the configured Java executable from `boson-world.json`, checks that the accepted EULA and loopback server binding are present, and raises only the local `max-players` setting as needed for the three residents, companion, and explorer. The explorer viewer is on port 3000 by default; the companion's separate viewer listener uses 3001 and the local goal gateway uses 8001. All listeners bind to loopback only. It writes per-run logs under `~/.cache/boson/minecraft-1.21.11/boson-demo-logs/` (or the corresponding `BOSON_MC_DIR`).
+
+`BOSON_EXPLORER_VIEWER_PORT` can select another unused local explorer-viewer port if 3000 is occupied; `BOSON_COMPANION_VIEWER_PORT` can change the companion's separate viewer port. (`BOSON_VIEWER_PORT` remains a compatibility alias for the explorer viewer port when starting this launcher.) If startup fails, check the last message in the launcher and its per-run logs; confirm Java 21+ is installed at the executable recorded in `boson-world.json`, the server jar and `eula=true` already exist, and no process is using ports 25565, 8001, or either selected viewer port. Missing adapter dependencies can be installed explicitly with `npm ci --prefix packages/minecraft`.
+
 The canonical preset is a superflat forest biome. Biome features are enabled to provide reachable trees on otherwise clear terrain. Once the EULA is accepted, inspect and record the generated spawn layout; adjust the seed only if that evidence shows it misses the intended scene. The runtime bot-join and observation gate is validated by the Minecraft adapter task.
 
 `BOSON_MC_DIR` can point the scripts to a different cache directory. The default is `${XDG_CACHE_HOME:-$HOME/.cache}/boson/minecraft-1.21.11`. The directory contains the server jar, world, configuration, and reset backups.
