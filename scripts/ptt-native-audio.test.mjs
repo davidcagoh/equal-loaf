@@ -6,7 +6,7 @@ import {
   isNativeRealtimeSessionAck,
   summarizeRealtimeAudioUsage,
 } from '../boson-api-demo/ptt-native-audio.js';
-import { audioOutputTime, createNativeResponsePlayback } from '../boson-api-demo/native-response-playback.js';
+import { audioOutputTime, createNativeResponsePlayback, evaluateNativeAudioChunk } from '../boson-api-demo/native-response-playback.js';
 
 test('native output audio decodes little-endian PCM16 into normalized transient samples', () => {
   const bytes = Buffer.alloc(6);
@@ -112,4 +112,26 @@ test('played-time fallback uses known output latency and never guesses without a
   assert.equal(audioOutputTime({ getOutputTimestamp: () => ({ contextTime: 12.5 }), currentTime: 13 }), 12.5);
   assert.equal(audioOutputTime({ currentTime: 13, baseLatency: 0.08, outputLatency: 0.12 }), 12.8);
   assert.equal(audioOutputTime({ currentTime: 13 }), 0);
+});
+
+test('native output admission reports bounded reject reasons instead of conflating PCM and queue failures', () => {
+  const samples = new Float32Array(24_000);
+  assert.deepEqual(evaluateNativeAudioChunk({
+    hasContext: true, responseAccepted: true, samples, responseSeconds: 1, queuedSeconds: 1,
+  }), { accepted: true, duration: 1 });
+  assert.deepEqual(evaluateNativeAudioChunk({
+    hasContext: false, responseAccepted: true, samples, responseSeconds: 0, queuedSeconds: 0,
+  }), { accepted: false, reason: 'audio_context_unavailable' });
+  assert.deepEqual(evaluateNativeAudioChunk({
+    hasContext: true, responseAccepted: true, samples: null, responseSeconds: 0, queuedSeconds: 0,
+  }), { accepted: false, reason: 'invalid_pcm_delta' });
+  assert.deepEqual(evaluateNativeAudioChunk({
+    hasContext: true, responseAccepted: true, samples, responseSeconds: 120, queuedSeconds: 0,
+  }), { accepted: false, reason: 'response_duration_limit' });
+  assert.deepEqual(evaluateNativeAudioChunk({
+    hasContext: true, responseAccepted: true, samples, responseSeconds: 0, queuedSeconds: 60,
+  }), { accepted: false, reason: 'output_queue_limit' });
+  assert.deepEqual(evaluateNativeAudioChunk({
+    hasContext: true, responseAccepted: false, samples, responseSeconds: 0, queuedSeconds: 0,
+  }), { accepted: false, reason: 'stale_response' });
 });

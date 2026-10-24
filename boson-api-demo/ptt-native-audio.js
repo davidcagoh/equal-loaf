@@ -1,4 +1,4 @@
-import { audioOutputTime, createNativeResponsePlayback } from './native-response-playback.js';
+import { audioOutputTime, createNativeResponsePlayback, evaluateNativeAudioChunk } from './native-response-playback.js';
 
 const RATE = 24_000;
 const REALTIME_URL = 'wss://api.boson.ai/v1/realtime';
@@ -164,7 +164,12 @@ function bootNativePtt() {
     state.socket.send(JSON.stringify(message));
     return true;
   };
-  const stopOutput = () => {
+  const stopOutput = (reason) => {
+    const stoppedSources = state.playingSources.size;
+    const queuedMilliseconds = Math.round(state.queuedOutputSeconds * 1_000);
+    if (stoppedSources > 0 || queuedMilliseconds > 0) {
+      diagnostic(`Audio queue cleared · ${reason} · sources=${stoppedSources} · queued_ms=${queuedMilliseconds}`);
+    }
     for (const record of state.playingSources) {
       state.stoppedOutputResponses.add(record.responseId);
       try { record.source.stop(); } catch { /* already ended */ }
@@ -185,7 +190,7 @@ function bootNativePtt() {
     try { capture.source.disconnect(); } catch { /* already disconnected */ }
     for (const track of capture.stream.getTracks()) track.stop();
   };
-  const closeSession = async (message = 'Conversation ended.') => {
+  const closeSession = async (message = 'Conversation ended.', reason = 'session_ended') => {
     state.sessionGeneration += 1;
     state.sessionStarting = false;
     const sessionId = state.sessionId;
@@ -199,7 +204,7 @@ function bootNativePtt() {
     state.sessionReady = false;
     state.responseInProgress = false;
     stopCapture();
-    stopOutput();
+    stopOutput(reason);
     state.responsePlayback.reset();
     state.stoppedOutputResponses.clear();
     for (const timer of state.timers) clearTimeout(timer);
@@ -238,7 +243,7 @@ function bootNativePtt() {
   const failSession = (code) => {
     const safeCode = safeProviderCode(code);
     diagnostic(`Session ended · ${safeCode}`);
-    void closeSession(`Session ended · ${safeCode}`);
+    void closeSession(`Session ended · ${safeCode}`, `session_failure_${safeCode}`);
   };
   const finalizeInterruption = (responseId) => {
     const pending = state.interruptionPending;
@@ -252,10 +257,10 @@ function bootNativePtt() {
       if (!send({ type: 'input_audio_buffer.commit' })) failSession('input_commit_failed');
     }
   };
-  const interruptOutput = () => {
+  const interruptOutput = (reason = 'held_ptt') => {
     const interruption = state.responsePlayback.interrupt(outputPlaybackTime());
     const hadUntrackedResponse = state.responseInProgress && !interruption;
-    stopOutput();
+    stopOutput(reason);
     if (interruption?.cancel || hadUntrackedResponse) {
       state.interruptionPending = { responseId: interruption?.responseId ?? null };
       state.cancelRequestedAt = Date.now();
@@ -271,14 +276,22 @@ function bootNativePtt() {
     }
   };
   const scheduleOutput = (encoded, event) => {
-    if (!state.audioContext) return false;
+    if (!state.audioContext) return { accepted: false, reason: 'audio_context_unavailable' };
     const responseId = safeProviderId(event.response_id) ?? state.activeResponseId;
-    if (!responseId || !state.responsePlayback.acceptsAudio(responseId)) return true;
+    if (!responseId || !state.responsePlayback.acceptsAudio(responseId)) return { accepted: true, ignored: true };
     const samples = decodePcm16Base64Audio(encoded);
-    if (!samples) return false;
-    const duration = samples.length / RATE;
-    if (state.responseOutputSeconds + duration > MAX_OUTPUT_SECONDS_PER_RESPONSE
-      || state.queuedOutputSeconds + duration > MAX_QUEUED_OUTPUT_SECONDS) return false;
+    const decision = evaluateNativeAudioChunk({
+      hasContext: true,
+      responseAccepted: true,
+      samples,
+      responseSeconds: state.responseOutputSeconds,
+      queuedSeconds: state.queuedOutputSeconds,
+      sampleRate: RATE,
+      maxResponseSeconds: MAX_OUTPUT_SECONDS_PER_RESPONSE,
+      maxQueuedSeconds: MAX_QUEUED_OUTPUT_SECONDS,
+    });
+    if (!decision.accepted) return decision;
+    const { duration } = decision;
     const buffer = state.audioContext.createBuffer(1, samples.length, RATE);
     buffer.copyToChannel(samples, 0);
     const source = state.audioContext.createBufferSource();
@@ -312,7 +325,7 @@ function bootNativePtt() {
     };
     source.start(startAt);
     updateUsage();
-    return true;
+    return { accepted: true, ignored: false };
   };
   const handleMessage = (raw) => {
     let event;
@@ -353,10 +366,13 @@ function bootNativePtt() {
       return;
     }
     if (event.type === 'response.output_audio.delta') {
-      if (!scheduleOutput(event.delta, event)) {
-        diagnostic('Audio response stopped at the local output buffer limit.');
-        interruptOutput();
-        status('response-state', 'Response stopped · audio buffer limit reached.', 'warn');
+      const scheduled = scheduleOutput(event.delta, event);
+      if (!scheduled.accepted) {
+        const responseId = safeProviderId(event.response_id) ?? state.activeResponseId ?? 'unknown';
+        const itemId = safeProviderId(event.item_id) ?? 'unknown';
+        diagnostic(`Audio output rejected · ${scheduled.reason} · response=${responseId} · item=${itemId} · queued_ms=${Math.round(state.queuedOutputSeconds * 1_000)}`);
+        interruptOutput(`output_rejected_${scheduled.reason}`);
+        status('response-state', `Response stopped · ${scheduled.reason.replaceAll('_', ' ')}.`, 'warn');
         refreshControls();
       }
       return;
@@ -382,6 +398,10 @@ function bootNativePtt() {
       state.responseInProgress = false;
       state.turns += 1;
       const response = event.response && typeof event.response === 'object' ? event.response : {};
+      const responseStatus = ['completed', 'cancelled', 'incomplete', 'failed'].includes(response.status) ? response.status : 'unknown';
+      if (responseStatus !== 'completed') {
+        diagnostic(`Response ended · status=${responseStatus} · response=${responseId ?? 'unknown'} · queued_ms=${Math.round(state.queuedOutputSeconds * 1_000)}`);
+      }
       const responseTokens = summarizeRealtimeAudioUsage(response.usage);
       if (responseTokens) {
         state.providerTokens = Object.fromEntries(Object.keys(responseTokens).map((field) => [

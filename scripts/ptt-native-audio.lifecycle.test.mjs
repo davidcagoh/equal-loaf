@@ -233,3 +233,16 @@ test('response.done before cancel-not-active error preserves the session and nex
   assert.equal(socket.sent.filter((message) => message.type === 'response.create').length, 1);
   assert.equal(socket.sent.filter((message) => message.type === 'input_audio_buffer.commit').length, 1);
 });
+
+test('rejected PCM records only bounded reason and correlation metadata, without raw audio', async (t) => {
+  const { ids, socket } = await bootMockedLab(t);
+  socket.message({ type: 'response.created', response: { id: 'resp_bad_pcm' } });
+  socket.message({
+    type: 'response.output_audio.delta', response_id: 'resp_bad_pcm', item_id: 'item_bad_pcm',
+    delta: Buffer.from([1]).toString('base64'),
+  });
+  const diagnostics = ids.get('diagnostic-list').children.map((item) => item.textContent).join('\n');
+  assert.match(diagnostics, /Audio output rejected · invalid_pcm_delta · response=resp_bad_pcm · item=item_bad_pcm/);
+  assert.doesNotMatch(diagnostics, /AQ==|transcript|secret|credential/i);
+  assert.ok(socket.sent.some((message) => message.type === 'response.cancel'));
+});

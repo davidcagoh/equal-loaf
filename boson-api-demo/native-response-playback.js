@@ -1,6 +1,25 @@
 const MAX_RESPONSE_IDS = 64;
 const SAFE_ID = /^[A-Za-z0-9:_-]{1,128}$/;
 
+export function evaluateNativeAudioChunk({
+  hasContext, responseAccepted, samples, responseSeconds, queuedSeconds,
+  sampleRate = 24_000, maxResponseSeconds = 120, maxQueuedSeconds = 60,
+}) {
+  if (!hasContext) return { accepted: false, reason: 'audio_context_unavailable' };
+  if (!responseAccepted) return { accepted: false, reason: 'stale_response' };
+  if (!(samples instanceof Float32Array) || samples.length === 0 || !Number.isFinite(sampleRate) || sampleRate <= 0) {
+    return { accepted: false, reason: 'invalid_pcm_delta' };
+  }
+  const duration = samples.length / sampleRate;
+  if (!Number.isFinite(responseSeconds) || responseSeconds + duration > maxResponseSeconds) {
+    return { accepted: false, reason: 'response_duration_limit' };
+  }
+  if (!Number.isFinite(queuedSeconds) || queuedSeconds + duration > maxQueuedSeconds) {
+    return { accepted: false, reason: 'output_queue_limit' };
+  }
+  return { accepted: true, duration };
+}
+
 export function calculatePlayedAudioEndMs(chunks, now) {
   if (!Array.isArray(chunks) || !Number.isFinite(now)) return 0;
   const playedSeconds = chunks.reduce((total, chunk) => {
