@@ -8,6 +8,8 @@ import { NativeResidentPcmMixer } from './audio/native-resident-pcm-mixer.js';
 const REALTIME_URL = 'wss://api.boson.ai/v1/realtime';
 const MAX_OUTPUT_TRANSCRIPT_CHARS = 1_000;
 const MAX_PENDING_PCM_REMAINDERS = 64;
+const MAX_NATIVE_REACTION_SESSIONS = 4;
+const MAX_NATIVE_REACTION_CONTEXT_BYTES = 2_000;
 
 export class NativeResidentAudioClient {
   constructor({
@@ -52,6 +54,9 @@ export class NativeResidentAudioClient {
     this.eventSource = null;
     this.positionSocket = null;
     this.removeUiListeners = [];
+    this.nativeActivationId = null;
+    this.nativeActivationPromise = null;
+    this.nativeActivationNeedsRefresh = false;
   }
 
   start() {
@@ -77,8 +82,10 @@ export class NativeResidentAudioClient {
     this.holdSource = source;
     const generation = ++this.heldGeneration;
     try {
+      const activation = this.EventSource ? this.#activateNativeAudio() : null;
       this.failureStage = 'audio_context_create';
       await this.#ensureAudioContext();
+      if (activation) await activation;
       if (!this.#isHeld(generation)) return;
       if (this.turn) {
         this.turn.pendingNewTurn = true;
@@ -122,6 +129,9 @@ export class NativeResidentAudioClient {
     if (this.destroyed) return;
     const turn = this.turn;
     this.destroyed = true;
+    const activationId = this.nativeActivationId;
+    this.nativeActivationId = null;
+    if (activationId) void this.#post('/boson-ptt/native-audio/deactivate', { activationId }).catch(() => undefined);
     this.releaseHeldTurn();
     this.eventSource?.close();
     this.positionSocket?.off?.('position', this.listenerPositionHandler);
@@ -175,13 +185,22 @@ export class NativeResidentAudioClient {
       connection.playback.begin(responseId);
       connection.activeResponseId = responseId;
       connection.responseStates.set(responseId, { status: null });
+      if (connection.activeReaction && !connection.turn) {
+        connection.activeReaction.responseId = responseId;
+        connection.reactionByResponse.set(responseId, connection.activeReaction.reactionId);
+      } else if (connection.reactionInterruptResolve && connection.interruptedReactionId) {
+        connection.reactionInterruptResponseId = responseId;
+        connection.reactionByResponse.set(responseId, connection.interruptedReactionId);
+      }
       return;
     }
     if (event.type === 'response.output_audio.delta') {
+      if (connection.reactionInterruptResponseId === safeProviderId(event.response_id)) return;
       await this.#receivePcm(connection, event);
       return;
     }
     if (event.type === 'response.output_audio_transcript.delta' && typeof event.delta === 'string') {
+      if (connection.reactionInterruptResponseId === safeProviderId(event.response_id)) return;
       const state = this.#responseItem(connection, event);
       state.transcript = appendBounded(state.transcript, event.delta, MAX_OUTPUT_TRANSCRIPT_CHARS);
       return;
@@ -207,20 +226,183 @@ export class NativeResidentAudioClient {
         state.generationFinished = true;
         if (state.utteranceStarted) this.mixer?.finishUtterance(state.utteranceId);
       }
+      const isReactionResponse = connection.reactionByResponse.has(responseId);
+      if (isReactionResponse && responseItems.length === 0
+        && connection.activeReaction?.responseId === responseId) connection.activeReaction = null;
+      if (isReactionResponse && responseItems.length === 0) connection.reactionByResponse.delete(responseId);
       if (connection.activeResponseId === responseId) connection.activeResponseId = null;
-      if (connection.turn) connection.turn.responseInProgress = false;
+      if (connection.turn && !isReactionResponse) connection.turn.responseInProgress = false;
       this.onStatus(status === 'completed' ? 'reply_playing' : 'reply_interrupted');
-      if (connection.turn) this.#maybeEndTurn(connection.turn);
+      if (connection.reactionInterruptResolve
+        && (!connection.reactionInterruptResponseId || connection.reactionInterruptResponseId === responseId)) {
+        this.#resolveReactionInterrupt(connection);
+      }
+      if (connection.turn && !isReactionResponse) this.#maybeEndTurn(connection.turn);
       return;
     }
     if (event.type === 'error') {
       const code = safeCode(event.error?.code);
+      if (code === 'response_cancel_not_active' && connection.reactionInterruptResolve) {
+        this.#resolveReactionInterrupt(connection);
+        return;
+      }
       if (code === 'response_cancel_not_active' && connection.interruptionPending) {
         this.#finalizeInterruption(connection, connection.interruptionPending.responseId);
         return;
       }
       throw new Error(code);
     }
+  }
+
+  async #activateNativeAudio() {
+    if (this.turn) return;
+    if (this.nativeActivationId && !this.nativeActivationNeedsRefresh) return;
+    if (this.nativeActivationPromise) return this.nativeActivationPromise;
+    if (this.nativeActivationId && this.nativeActivationNeedsRefresh) await this.#retireNativeActivation();
+    this.nativeActivationPromise = this.#performNativeActivation();
+    try { await this.nativeActivationPromise; }
+    finally { this.nativeActivationPromise = null; }
+  }
+
+  async #retireNativeActivation() {
+    const activationId = this.nativeActivationId;
+    this.nativeActivationId = null;
+    this.nativeActivationNeedsRefresh = false;
+    for (const [sessionId, connection] of this.connections) {
+      if (!connection.activationSession) continue;
+      connection.reactionStream?.close?.();
+      try { connection.socket.close(1000, 'native activation refreshed'); } catch { /* already closed */ }
+      this.connections.delete(sessionId);
+    }
+    if (activationId) await this.#post('/boson-ptt/native-audio/deactivate', { activationId }).catch(() => undefined);
+  }
+
+  async #performNativeActivation() {
+    try {
+      let activation;
+      try { activation = await this.#post('/boson-ptt/native-audio/activate', {}); }
+      catch (error) {
+        if (!isRetryableActivationFailure(error)) throw error;
+        activation = await this.#post('/boson-ptt/native-audio/activate', {});
+      }
+      if (activation?.available !== true || !safeProviderId(activation.activationId)
+        || !Array.isArray(activation.sessions) || activation.sessions.length > MAX_NATIVE_REACTION_SESSIONS) return;
+      this.nativeActivationId = activation.activationId;
+      this.nativeActivationNeedsRefresh = false;
+      const seenSessionIds = new Set();
+      if (activation.sessions.length === 0) this.nativeActivationNeedsRefresh = true;
+      for (const session of activation.sessions) {
+        if (this.destroyed) break;
+        if (!isNativeReactionSession(session) || seenSessionIds.has(session.residentSessionId)) {
+          this.nativeActivationNeedsRefresh = true;
+          continue;
+        }
+        seenSessionIds.add(session.residentSessionId);
+        try { await this.#openReactionSession(session); }
+        catch {
+          const failedConnection = this.connections.get(session.residentSessionId);
+          if (failedConnection) {
+            failedConnection.reactionStream?.close?.();
+            try { failedConnection.socket.close(1000, 'reaction setup failed'); } catch { /* already closed */ }
+            this.connections.delete(session.residentSessionId);
+          }
+          this.nativeActivationNeedsRefresh = true;
+          this.onStatus('reaction_session_unavailable');
+        }
+      }
+      if (this.destroyed && this.nativeActivationId) {
+        const activationId = this.nativeActivationId;
+        this.nativeActivationId = null;
+        await this.#post('/boson-ptt/native-audio/deactivate', { activationId }).catch(() => undefined);
+      }
+    } catch {
+      this.onStatus('reaction_activation_unavailable');
+      if (this.nativeActivationId) {
+        const activationId = this.nativeActivationId;
+        this.nativeActivationId = null;
+        await this.#post('/boson-ptt/native-audio/deactivate', { activationId }).catch(() => undefined);
+      }
+    }
+  }
+
+  async #openReactionSession(session) {
+    const voice = session.voice;
+    let clientSecret = session.shortLivedCredential;
+    const socket = new this.WebSocket(REALTIME_URL, ['realtime', `bai-client-secret.${clientSecret}`]);
+    clientSecret = '';
+    session.shortLivedCredential = '';
+    const connection = {
+      residentSessionId: session.residentSessionId, residentId: session.residentId,
+      speakerName: session.speakerName, voice, pendingBegin: null, activationInstructions: session.instructions,
+      activationSession: true,
+      socket, ready: false, turn: null, playback: createNativeResponsePlayback(), activeResponseId: null,
+      interruptionPending: null, outputItems: new Map(), responseStates: new Map(),
+      pendingByteMap: new Map(), reactionStream: null, activeReaction: null, reactionByResponse: new Map(),
+    };
+    this.connections.set(session.residentSessionId, connection);
+    connection.readyPromise = new Promise((resolve, reject) => {
+      connection.resolveReady = resolve;
+      connection.rejectReady = reject;
+      socket.addEventListener('open', () => {
+        if (this.connections.get(session.residentSessionId) !== connection) return;
+        socket.send(JSON.stringify({ type: 'session.update', session: createSessionConfig(connection.activationInstructions, voice) }));
+      });
+      socket.addEventListener('message', (message) => {
+        if (typeof message.data !== 'string') return;
+        try { void this.handleRealtimeEvent(connection, JSON.parse(message.data)).catch((error) => this.#failConnection(connection, failureCodeFromError(error))); }
+        catch { this.onStatus('provider_event_invalid'); }
+      });
+      socket.addEventListener('error', () => this.#failConnection(connection, 'provider_connection_failed'));
+      socket.addEventListener('close', () => this.#failConnection(connection, 'provider_connection_closed'));
+    });
+    const timer = setTimeout(() => connection.rejectReady?.(new Error('session_ack_timeout')), 15_000);
+    try { await connection.readyPromise; }
+    catch (error) {
+      connection.failed = true;
+      this.connections.delete(session.residentSessionId);
+      try { socket.close(1000, 'native setup failed'); } catch { /* already closed */ }
+      throw error;
+    } finally { clearTimeout(timer); }
+    if (this.destroyed) { socket.close(1000, 'viewer closed'); return; }
+    this.residentPositions.set(session.residentId, { ...session.position });
+    this.mixer?.setSpeakerPosition(session.residentId, session.position);
+    const stream = new this.EventSource(session.reactionStream);
+    connection.reactionStream = stream;
+    stream.addEventListener('native-reaction', (event) => {
+      let dispatch;
+      try { dispatch = JSON.parse(event.data); } catch { return; }
+      void this.#dispatchNativeReaction(connection, dispatch);
+    });
+    stream.addEventListener('error', () => this.onStatus('reaction_stream_reconnecting'));
+  }
+
+  async #dispatchNativeReaction(connection, dispatch) {
+    if (!safeProviderId(dispatch?.reactionId)) return;
+    const valid = this.connections.get(connection.residentSessionId) === connection && isNativeReactionDispatch(dispatch)
+      && dispatch.residentId === connection.residentId && dispatch.causalDepth < 2;
+    const status = !valid || dispatch.expiresAt <= Date.now() ? 'unavailable'
+      : (connection.turn || connection.activeReaction || connection.failed || !connection.ready ? 'busy' : 'accepted');
+    if (valid && status === 'accepted') connection.activeReaction = { ...dispatch, responseId: null, outputCount: 0 };
+    try {
+      const acknowledgement = await this.#post('/boson-ptt/reaction/ack', {
+        reactionId: safeProviderId(dispatch?.reactionId) ? dispatch.reactionId : 'invalid',
+        residentSessionId: connection.residentSessionId, status,
+      });
+      if (status === 'accepted' && (acknowledgement?.accepted !== true || acknowledgement?.status !== 'accepted')) {
+        if (connection.activeReaction?.reactionId === dispatch?.reactionId) connection.activeReaction = null;
+        return;
+      }
+    } catch {
+      if (connection.activeReaction?.reactionId === dispatch?.reactionId) connection.activeReaction = null;
+      return;
+    }
+    if (status !== 'accepted' || !connection.activeReaction || connection.activeReaction.reactionId !== dispatch.reactionId) return;
+    const text = `You are ${connection.speakerName}. You heard this attributed, unverified context: ${dispatch.context}. Reply naturally in one brief spoken line. Do not claim to perform actions.`;
+    connection.socket.send(JSON.stringify({ type: 'conversation.item.create', item: {
+      type: 'message', role: 'user', content: [{ type: 'input_text', text }],
+    } }));
+    connection.activeReaction.responseRequested = true;
+    connection.socket.send(JSON.stringify({ type: 'response.create' }));
   }
 
   async #ensureAudioContext() {
@@ -259,6 +441,7 @@ export class NativeResidentAudioClient {
       }
     }
     if (!connection) return;
+    if (connection.activeReaction) await this.#interruptReaction(connection);
     connection.turn = { ...begin, connection, generation, released: false, pendingNewTurn: false,
       waitingForCommit: false, responseInProgress: false, pendingInputTranscriptions: new Set(),
       pendingInputSpeechAcks: 0, inputTranscriptionTimers: new Map() };
@@ -296,7 +479,7 @@ export class NativeResidentAudioClient {
       pendingBegin: begin,
       socket, ready: false, turn: null, playback: createNativeResponsePlayback(), activeResponseId: null,
       interruptionPending: null, outputItems: new Map(), responseStates: new Map(),
-      pendingByteMap: new Map(), reactionStream: null,
+      pendingByteMap: new Map(), reactionStream: null, activeReaction: null, reactionByResponse: new Map(),
     };
     this.connections.set(begin.residentSessionId, connection);
     connection.readyPromise = new Promise((resolve, reject) => {
@@ -393,7 +576,9 @@ export class NativeResidentAudioClient {
     let item = connection.outputItems.get(utteranceId);
     if (!item) {
       item = { utteranceId, responseId, itemId, contentIndex, transcript: '', chain: Promise.resolve(),
-        utteranceStarted: false, generationFinished: false, speechStarted: false };
+        utteranceStarted: false, generationFinished: false, speechStarted: false,
+        reactionId: connection.reactionByResponse.get(responseId)
+          ?? (connection.activeReaction && !connection.turn ? connection.activeReaction.reactionId : null) };
       connection.outputItems.set(utteranceId, item);
     }
     const responseState = connection.responseStates.get(responseId) ?? { status: null, outputSeconds: 0 };
@@ -401,10 +586,16 @@ export class NativeResidentAudioClient {
     connection.responseStates.set(responseId, responseState);
     item.chain = item.chain.then(async () => {
       if (!item.speechStarted) {
-        await this.#post('/boson-ptt/speech/start', {
+        if (item.reactionId) {
+          const started = await this.#post('/boson-ptt/reaction/speech/start', {
+            reactionId: item.reactionId, residentSessionId: connection.residentSessionId, responseId, itemId,
+          });
+          if (started?.accepted !== true || started?.status !== 'started') throw new Error('reaction_start_rejected');
+        } else await this.#post('/boson-ptt/speech/start', {
           turnId: connection.turn?.turnId, residentSessionId: connection.residentSessionId, responseId, itemId,
         });
         item.speechStarted = true;
+        if (item.reactionId && connection.activeReaction?.reactionId === item.reactionId) connection.activeReaction.outputCount += 1;
         if (connection.failed || item.interrupted) return;
         item.utteranceStarted = this.mixer.startUtterance({ speakerId: connection.residentId, utteranceId });
       }
@@ -470,7 +661,9 @@ export class NativeResidentAudioClient {
     let item = connection.outputItems.get(utteranceId);
     if (!item) {
       item = { utteranceId, responseId, itemId, contentIndex, transcript: '', chain: Promise.resolve(),
-        utteranceStarted: false, generationFinished: false, speechStarted: false };
+        utteranceStarted: false, generationFinished: false, speechStarted: false,
+        reactionId: connection.reactionByResponse.get(responseId)
+          ?? (connection.activeReaction && !connection.turn ? connection.activeReaction.reactionId : null) };
       connection.outputItems.set(utteranceId, item);
     }
     return item;
@@ -484,21 +677,40 @@ export class NativeResidentAudioClient {
     const responseStatus = connection.responseStates.get(item.responseId)?.status;
     const completed = event.playback === 'completed' && responseStatus === 'completed'
       && Boolean(item.transcript.trim()) && item.transcript.length <= MAX_OUTPUT_TRANSCRIPT_CHARS;
-    this.#finishSpeechItem(connection, item, completed ? 'completed' : 'interrupted');
+    void this.#finishSpeechItem(connection, item, completed ? 'completed' : 'interrupted');
   }
 
   #finishSpeechItem(connection, item, playback) {
     if (item.finishing) return;
     item.finishing = true;
+    if (item.reactionId) {
+      if (!item.speechStarted) {
+        connection.outputItems.delete(item.utteranceId);
+        return Promise.resolve();
+      }
+      const transcript = item.transcript.trim();
+      const completed = playback === 'completed' && transcript.length > 0;
+      return this.#post('/boson-ptt/reaction/speech/finish', {
+        reactionId: item.reactionId, residentSessionId: connection.residentSessionId,
+        responseId: item.responseId, itemId: item.itemId, playback: completed ? 'completed' : 'interrupted',
+        ...(completed ? { transcript } : {}),
+      }).catch(() => this.onStatus('reaction_finish_failed')).finally(() => {
+        connection.outputItems.delete(item.utteranceId);
+        if (![...connection.outputItems.values()].some((output) => output.reactionId === item.reactionId)) {
+          if (connection.activeReaction?.reactionId === item.reactionId) connection.activeReaction = null;
+          connection.reactionByResponse.delete(item.responseId);
+        }
+      });
+    }
     const turnId = connection.turn?.turnId;
     if (!item.speechStarted || !turnId) {
       connection.outputItems.delete(item.utteranceId);
       if (connection.turn) this.#maybeEndTurn(connection.turn);
-      return;
+      return Promise.resolve();
     }
     const transcript = item.transcript.trim();
     const completed = playback === 'completed' && transcript.length > 0;
-    void this.#post('/boson-ptt/speech/finish', {
+    return this.#post('/boson-ptt/speech/finish', {
       turnId, residentSessionId: connection.residentSessionId, responseId: item.responseId, itemId: item.itemId,
       playback: completed ? 'completed' : 'interrupted',
       ...(completed ? { transcript } : {}),
@@ -510,10 +722,14 @@ export class NativeResidentAudioClient {
 
   #interruptOutput(connection) {
     const activeResponseId = connection.activeResponseId;
+    const reactionResponsePending = connection.activeReaction?.responseRequested === true
+      && (!connection.activeReaction.responseId || connection.responseStates.get(connection.activeReaction.responseId)?.status === null);
     const interruption = connection.playback.interrupt(audioOutputTime(this.context));
     this.#discardPcmRemainders(connection, interruption?.responseId ?? activeResponseId);
     if (!interruption) {
-      if (connection.turn?.responseInProgress && connection.socket.readyState === this.WebSocket.OPEN) connection.socket.send(JSON.stringify({ type: 'response.cancel' }));
+      if ((connection.turn?.responseInProgress || reactionResponsePending) && connection.socket.readyState === this.WebSocket.OPEN) {
+        connection.socket.send(JSON.stringify({ type: 'response.cancel' }));
+      }
       for (const item of connection.outputItems.values()) this.mixer?.stopUtterance(item.utteranceId);
       return;
     }
@@ -524,7 +740,37 @@ export class NativeResidentAudioClient {
     } else if (interruption.truncate) {
       if (connection.socket.readyState === this.WebSocket.OPEN) connection.socket.send(JSON.stringify(interruption.truncate));
       connection.playback.clear(interruption.responseId);
+      if (reactionResponsePending && connection.socket.readyState === this.WebSocket.OPEN) {
+        connection.socket.send(JSON.stringify({ type: 'response.cancel' }));
+      }
     }
+  }
+
+  async #interruptReaction(connection) {
+    const reaction = connection.activeReaction;
+    if (!reaction) return;
+    const responsePending = reaction.responseRequested
+      && (!reaction.responseId || connection.responseStates.get(reaction.responseId)?.status === null);
+    this.#interruptOutput(connection);
+    for (const item of connection.outputItems.values()) this.mixer?.stopUtterance(item.utteranceId);
+    connection.activeReaction = null;
+    if (responsePending && connection.socket.readyState === this.WebSocket.OPEN) {
+      connection.interruptedReactionId = reaction.reactionId;
+      await new Promise((resolve) => {
+        connection.reactionInterruptResolve = resolve;
+        connection.reactionInterruptTimer = setTimeout(() => this.#resolveReactionInterrupt(connection), 1_000);
+      });
+    }
+  }
+
+  #resolveReactionInterrupt(connection) {
+    if (!connection.reactionInterruptResolve) return;
+    clearTimeout(connection.reactionInterruptTimer);
+    connection.reactionInterruptTimer = null;
+    connection.reactionInterruptResolve();
+    connection.reactionInterruptResolve = null;
+    connection.interruptedReactionId = null;
+    connection.reactionInterruptResponseId = null;
   }
 
   #finalizeInterruption(connection, responseId) {
@@ -584,7 +830,8 @@ export class NativeResidentAudioClient {
 
   async #post(path, body) {
     const response = await this.fetch(path, { method: 'POST', credentials: 'same-origin', cache: 'no-store', redirect: 'error',
-      headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) });
+      headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body),
+      ...(path === '/boson-ptt/native-audio/deactivate' ? { keepalive: true } : {}) });
     let value;
     try { value = await response.json(); }
     catch {
@@ -600,6 +847,11 @@ export class NativeResidentAudioClient {
     connection.rejectReady?.(new Error(code));
     if (connection.turn) this.#interruptOutput(connection);
     connection.failed = true;
+    connection.reactionStream?.close?.();
+    this.#resolveReactionInterrupt(connection);
+    if (connection.activationSession) this.nativeActivationNeedsRefresh = true;
+    if (connection.activeReaction) connection.activeReaction = null;
+    try { connection.socket.close(1011, 'resident session failed'); } catch { /* already closed */ }
     const turn = connection.turn;
     if (this.held) {
       this.held = false;
@@ -614,17 +866,17 @@ export class NativeResidentAudioClient {
       turn.released = true;
       turn.waitingForCommit = false;
       turn.responseInProgress = false;
-      for (const item of [...connection.outputItems.values()]) {
-        item.interrupted = true;
-        this.mixer?.stopUtterance(item.utteranceId);
-        item.generationFinished = true;
-        if (!item.utteranceStarted) {
-          void item.chain.then(() => this.#finishSpeechItem(connection, item, 'interrupted'),
-            () => this.#finishSpeechItem(connection, item, 'interrupted'));
-        } else this.#finishSpeechItem(connection, item, 'interrupted');
-      }
-      this.#maybeEndTurn(turn);
     }
+    for (const item of [...connection.outputItems.values()]) {
+      item.interrupted = true;
+      this.mixer?.stopUtterance(item.utteranceId);
+      item.generationFinished = true;
+      if (!item.utteranceStarted) {
+        void item.chain.then(() => this.#finishSpeechItem(connection, item, 'interrupted'),
+          () => this.#finishSpeechItem(connection, item, 'interrupted'));
+      } else void this.#finishSpeechItem(connection, item, 'interrupted');
+    }
+    if (turn) this.#maybeEndTurn(turn);
     if (this.connections.get(connection.residentSessionId) === connection) this.connections.delete(connection.residentSessionId);
     this.onStatus(code);
   }
@@ -710,7 +962,8 @@ export class NativeResidentAudioClient {
     document.addEventListener('keyup', keyup);
     window.addEventListener('blur', blur);
     document.addEventListener('visibilitychange', visibility);
-    window.addEventListener('pagehide', blur, { once: true });
+    const pagehide = () => this.stop();
+    window.addEventListener('pagehide', pagehide, { once: true });
     this.removeUiListeners.push(() => button.removeEventListener('pointerdown', down));
     this.removeUiListeners.push(() => window.removeEventListener('pointerup', up, true));
     this.removeUiListeners.push(() => window.removeEventListener('pointercancel', up, true));
@@ -719,6 +972,7 @@ export class NativeResidentAudioClient {
     this.removeUiListeners.push(() => document.removeEventListener('keyup', keyup));
     this.removeUiListeners.push(() => window.removeEventListener('blur', blur));
     this.removeUiListeners.push(() => document.removeEventListener('visibilitychange', visibility));
+    this.removeUiListeners.push(() => window.removeEventListener('pagehide', pagehide));
   }
 }
 
@@ -731,6 +985,34 @@ function createSessionConfig(instructions, voice, enableInputTranscription = fal
       output: { format: { type: 'audio/pcm', rate: NATIVE_REALTIME_RATE }, voice } },
     tools: [], tool_choice: 'none',
   };
+}
+
+function isNativeReactionSession(value) {
+  return Boolean(value && typeof value === 'object' && !Array.isArray(value)
+    && safeProviderId(value.residentSessionId) && safeProviderId(value.residentId)
+    && typeof value.speakerName === 'string' && value.speakerName.length > 0 && value.speakerName.length <= 80
+    && ['chloe', 'oliver', 'jake'].includes(value.voice)
+    && typeof value.instructions === 'string' && value.instructions.length > 0 && value.instructions.length <= 4_000
+    && validPosition(value.position)
+    && typeof value.shortLivedCredential === 'string' && value.shortLivedCredential.startsWith('bai-eph-')
+    && Number.isFinite(value.expiresAt) && value.expiresAt > Math.floor(Date.now() / 1_000)
+    && typeof value.reactionStream === 'string'
+    && value.reactionStream.startsWith(`/boson-ptt/reaction/stream?residentSessionId=${encodeURIComponent(value.residentSessionId)}`));
+}
+
+function isRetryableActivationFailure(error) {
+  return error instanceof TypeError || (error instanceof Error && error.message === 'invalid_json_response');
+}
+
+function isNativeReactionDispatch(value) {
+  return Boolean(value && typeof value === 'object' && !Array.isArray(value)
+    && Object.keys(value).sort().join(',') === 'causalDepth,context,eventId,expiresAt,reactionId,residentId,type,version'
+    && value.version === 1 && value.type === 'native.reaction.dispatch'
+    && safeProviderId(value.reactionId) && safeProviderId(value.eventId) && safeProviderId(value.residentId)
+    && typeof value.context === 'string' && value.context.trim().length > 0
+    && utf8Length(value.context) <= MAX_NATIVE_REACTION_CONTEXT_BYTES
+    && Number.isSafeInteger(value.causalDepth) && value.causalDepth >= 0 && value.causalDepth <= 2
+    && Number.isFinite(value.expiresAt) && value.expiresAt > Date.now() && value.expiresAt <= Date.now() + 120_000);
 }
 
 function validateBegin(value) {

@@ -126,24 +126,36 @@ test('native player hearing requires explicit opt-in on the native resident page
 test('trusted PTT gesture bootstraps bounded reaction sessions without a second microphone request', async () => {
   FakeSocket.instances = []; FakeAudioContext.instances = []; FakeEventSource.instances = [];
   const activation = { available: true, activationId: 'activation-1', sessions: [
-    { residentSessionId: 'session_pip_0001', residentId: 'pip', shortLivedCredential: 'bai-eph-pip', expiresAt: Date.now() + 60_000,
+    { residentSessionId: 'session_pip_0001', residentId: 'pip', speakerName: 'Pip', voice: 'jake', instructions: 'Pip prompt.',
+      position: { x: 2, y: 0, z: 0 }, shortLivedCredential: 'bai-eph-pip', expiresAt: Math.floor(Date.now() / 1_000) + 60,
       reactionStream: '/boson-ptt/reaction/stream?residentSessionId=session_pip_0001' },
-    { residentSessionId: 'session_mira_0002', residentId: 'mira', shortLivedCredential: 'bai-eph-mira', expiresAt: Date.now() + 60_000,
+    { residentSessionId: 'session_mira_0002', residentId: 'mira', speakerName: 'Mira', voice: 'chloe', instructions: 'Mira prompt.',
+      position: { x: -3, y: 0, z: 0 }, shortLivedCredential: 'bai-eph-mira', expiresAt: Math.floor(Date.now() / 1_000) + 60,
       reactionStream: '/boson-ptt/reaction/stream?residentSessionId=session_mira_0002' },
   ] };
+  let activationRequests = 0;
   const { client, requests, micRequests } = setupClient({
     fetchImpl: async (path: string, request: any) => {
       const body = request.body ? JSON.parse(request.body) : {};
       requests.push({ path, body });
-      if (path === '/boson-ptt/native-audio/activate') return { ok: true, status: 200, json: async () => activation };
+      if (path === '/boson-ptt/native-audio/activate') {
+        activationRequests += 1;
+        if (activationRequests === 1) throw new TypeError('transient network loss');
+        return { ok: true, status: 200, json: async () => activation };
+      }
       if (path === '/boson-ptt/native/begin') return { ok: true, status: 200, json: async () => ({ available: true, ...residents[0], instructions: 'Prompt for Thomas' }) };
       if (path === '/boson-ptt/native/credential') return { ok: true, status: 200, json: async () => ({ available: true, clientSecret: 'bai-eph-test' }) };
+      if (path === '/boson-ptt/reaction/ack') return { ok: true, status: 200, json: async () => ({ accepted: true, status: body.status }) };
+      if (path === '/boson-ptt/reaction/speech/start') return { ok: true, status: 200, json: async () => ({ accepted: true, status: 'started' }) };
+      if (path === '/boson-ptt/reaction/speech/finish') return { ok: true, status: 200, json: async () => ({ accepted: true, status: 'finished' }) };
       return { ok: true, status: 200, json: async () => ({ accepted: true }) };
     },
   });
   await client.beginHeldTurn('pointer');
   await settle(); await settle();
   assert.deepEqual(requests.find(({ path }) => path === '/boson-ptt/native-audio/activate')?.body, {});
+  assert.equal(requests.filter(({ path }) => path === '/boson-ptt/native-audio/activate').length, 2,
+    'a lost activation response is retried once using the same empty request');
   assert.equal(requests.filter(({ path }) => path === '/boson-ptt/native/credential').length, 0,
     'activation credential is used directly to create each persistent resident socket');
   assert.equal(client.connections.size, 2);
@@ -158,9 +170,11 @@ test('trusted PTT gesture bootstraps bounded reaction sessions without a second 
 test('reaction dispatch stays session-bound, requests text-only response, and finishes after spatial playback drains', async () => {
   FakeSocket.instances = []; FakeAudioContext.instances = []; FakeEventSource.instances = [];
   const activation = { available: true, activationId: 'activation-2', sessions: [
-    { residentSessionId: 'session_pip_0001', residentId: 'pip', shortLivedCredential: 'bai-eph-pip', expiresAt: Date.now() + 60_000,
+    { residentSessionId: 'session_pip_0001', residentId: 'pip', speakerName: 'Pip', voice: 'jake', instructions: 'Pip prompt.',
+      position: { x: 2, y: 0, z: 0 }, shortLivedCredential: 'bai-eph-pip', expiresAt: Math.floor(Date.now() / 1_000) + 60,
       reactionStream: '/boson-ptt/reaction/stream?residentSessionId=session_pip_0001' },
-    { residentSessionId: 'session_mira_0002', residentId: 'mira', shortLivedCredential: 'bai-eph-mira', expiresAt: Date.now() + 60_000,
+    { residentSessionId: 'session_mira_0002', residentId: 'mira', speakerName: 'Mira', voice: 'chloe', instructions: 'Mira prompt.',
+      position: { x: -3, y: 0, z: 0 }, shortLivedCredential: 'bai-eph-mira', expiresAt: Math.floor(Date.now() / 1_000) + 60,
       reactionStream: '/boson-ptt/reaction/stream?residentSessionId=session_mira_0002' },
   ] };
   const { client, requests, micRequests } = setupClient({
@@ -170,6 +184,12 @@ test('reaction dispatch stays session-bound, requests text-only response, and fi
       if (path === '/boson-ptt/native-audio/activate') return { ok: true, status: 200, json: async () => activation };
       if (path === '/boson-ptt/native/begin') return { ok: true, status: 200, json: async () => ({ available: true, ...residents[0], instructions: 'Prompt for Thomas' }) };
       if (path === '/boson-ptt/native/credential') return { ok: true, status: 200, json: async () => ({ available: true, clientSecret: 'bai-eph-test' }) };
+      if (path === '/boson-ptt/reaction/ack') return { ok: true, status: 200, json: async () => ({
+        accepted: body.status === 'accepted' && body.reactionId !== 'reaction-rejected',
+        status: body.reactionId === 'reaction-rejected' ? 'busy' : body.status,
+      }) };
+      if (path === '/boson-ptt/reaction/speech/start') return { ok: true, status: 200, json: async () => ({ accepted: true, status: 'started' }) };
+      if (path === '/boson-ptt/reaction/speech/finish') return { ok: true, status: 200, json: async () => ({ accepted: true, status: 'finished' }) };
       return { ok: true, status: 200, json: async () => ({ accepted: true }) };
     },
   });
@@ -186,39 +206,60 @@ test('reaction dispatch stays session-bound, requests text-only response, and fi
   await settle(); await settle();
   const pipStream = FakeEventSource.instances.find((stream) => stream.url.includes('session_pip_0001'))!;
   const miraStream = FakeEventSource.instances.find((stream) => stream.url.includes('session_mira_0002'))!;
+  pipStream.event('native-reaction', { version: 1, type: 'native.reaction.dispatch', reactionId: 'reaction-rejected',
+    eventId: 'event-rejected', residentId: 'pip', context: 'This event is declined.', causalDepth: 1, expiresAt: Date.now() + 30_000 });
+  await settle(); await settle();
+  const pip = client.connections.get('session_pip_0001');
+  const mira = client.connections.get('session_mira_0002');
+  assert.equal(pip.socket.sent.some(({ type, response }) => type === 'response.create' && response), false,
+    'a server-rejected ACK does not create a resident response');
+  miraStream.event('native-reaction', { version: 1, type: 'native.reaction.dispatch', reactionId: 'reaction-cross-session',
+    eventId: 'event-cross-session', residentId: 'pip', context: 'A mismatched resident event.', causalDepth: 1, expiresAt: Date.now() + 30_000 });
+  await settle();
+  assert.ok(requests.some(({ path, body }) => path === '/boson-ptt/reaction/ack'
+    && body.reactionId === 'reaction-cross-session' && body.residentSessionId === 'session_mira_0002' && body.status === 'unavailable'));
   pipStream.event('native-reaction', { version: 1, type: 'native.reaction.dispatch', reactionId: 'reaction-1',
     eventId: 'event-1', residentId: 'pip', context: 'Anna said the garden needs water.', causalDepth: 1, expiresAt: Date.now() + 30_000 });
+  await settle(); await settle();
+  miraStream.event('native-reaction', { version: 1, type: 'native.reaction.dispatch', reactionId: 'reaction-2',
+    eventId: 'event-2', residentId: 'mira', context: 'Thomas said the bakery is open.', causalDepth: 1, expiresAt: Date.now() + 30_000 });
   await settle(); await settle();
   assert.equal(micRequests(), 1, 'reaction processing never opens microphone capture');
   assert.ok(requests.some(({ path, body }) => path === '/boson-ptt/reaction/ack'
     && body.reactionId === 'reaction-1' && body.residentSessionId === 'session_pip_0001' && body.status === 'accepted'));
-  const pip = client.connections.get('session_pip_0001');
-  const mira = client.connections.get('session_mira_0002');
   assert.equal(pip.socket.sent.some(({ type }) => type === 'conversation.item.create'), true);
   assert.equal(pip.socket.sent.some(({ type }) => type === 'response.create'), true);
-  assert.equal(mira.socket.sent.some(({ type }) => type === 'conversation.item.create'), false,
-    'dispatch is delivered to the server-bound resident session only');
+  assert.equal(mira.socket.sent.some(({ type }) => type === 'conversation.item.create'), true,
+    'another resident can accept an independent concurrent dispatch');
   const input = pip.socket.sent.find(({ type }) => type === 'conversation.item.create');
   assert.match(input.item.content[0].text, /Anna said the garden needs water/);
-  const responseCreate = pip.socket.sent.find(({ type }) => type === 'response.create');
-  assert.deepEqual(responseCreate.response.output_modalities, ['audio']);
+  assert.ok(pip.socket.sent.some(({ type, response }) => type === 'response.create' && !response),
+    'the activated audio-only session uses its configured spoken output without a microphone response payload');
   assert.equal(pip.socket.sent.some(({ type }) => type === 'input_audio_buffer.append'), false);
 
+  await client.handleRealtimeEvent(mira, { type: 'response.created', response: { id: 'reaction-response-2' } });
+  await client.handleRealtimeEvent(mira, { type: 'response.output_audio_transcript.delta', response_id: 'reaction-response-2', item_id: 'reaction-item-2', delta: 'The bakery is ready.' });
+  await client.handleRealtimeEvent(mira, { type: 'response.output_audio.delta', response_id: 'reaction-response-2', item_id: 'reaction-item-2',
+    content_index: 0, delta: encodePcm16(new Float32Array(2_400)) });
   await client.handleRealtimeEvent(pip, { type: 'response.created', response: { id: 'reaction-response-1' } });
   await client.handleRealtimeEvent(pip, { type: 'response.output_audio_transcript.delta', response_id: 'reaction-response-1', item_id: 'reaction-item-1', delta: 'I will water them.' });
   await client.handleRealtimeEvent(pip, { type: 'response.output_audio.delta', response_id: 'reaction-response-1', item_id: 'reaction-item-1',
     content_index: 0, delta: encodePcm16(new Float32Array(2_400)) });
   await client.handleRealtimeEvent(pip, { type: 'response.done', response: { id: 'reaction-response-1', status: 'completed' } });
+  await client.handleRealtimeEvent(mira, { type: 'response.done', response: { id: 'reaction-response-2', status: 'completed' } });
   assert.equal(requests.some(({ path }) => path === '/boson-ptt/reaction/speech/finish'), false,
     'response.done does not mean the spatial audio has drained');
-  FakeAudioContext.instances[0].sources.at(-1)!.onended();
+  assert.equal(client.mixer.utterances.size, 2, 'both resident voices are independently spatialized and active together');
+  for (const source of [...FakeAudioContext.instances[0].sources]) source.onended();
   await settle(); await settle();
-  const reactionStart = requests.find(({ path }) => path === '/boson-ptt/reaction/speech/start');
+  const reactionStart = requests.find(({ path, body }) => path === '/boson-ptt/reaction/speech/start' && body.reactionId === 'reaction-1');
   assert.deepEqual(reactionStart?.body, { reactionId: 'reaction-1', residentSessionId: 'session_pip_0001',
     responseId: 'reaction-response-1', itemId: 'reaction-item-1' });
-  const reactionFinish = requests.find(({ path }) => path === '/boson-ptt/reaction/speech/finish');
+  const reactionFinish = requests.find(({ path, body }) => path === '/boson-ptt/reaction/speech/finish' && body.reactionId === 'reaction-1');
   assert.deepEqual(reactionFinish?.body, { reactionId: 'reaction-1', residentSessionId: 'session_pip_0001',
     responseId: 'reaction-response-1', itemId: 'reaction-item-1', playback: 'completed', transcript: 'I will water them.' });
+  assert.ok(requests.some(({ path, body }) => path === '/boson-ptt/reaction/speech/finish'
+    && body.reactionId === 'reaction-2' && body.residentSessionId === 'session_mira_0002' && body.playback === 'completed'));
   client.stop();
 });
 
@@ -250,6 +291,79 @@ test('reused resident sessions receive fresh attributed hearing in the next sess
   assert.equal(client.turn.residentSessionId, first.residentSessionId);
   assert.ok(first.connection.socket.sent.some(({ type, session }) => type === 'session.update'
     && session.instructions.includes('Mira said: “The garden needs water.”')));
+  client.stop();
+});
+
+test('PTT interrupts its resident reaction and leaves another resident reaction playing', async () => {
+  FakeSocket.instances = []; FakeAudioContext.instances = []; FakeEventSource.instances = [];
+  let beginCount = 0;
+  const activation = { available: true, activationId: 'activation-priority', sessions: [
+    { residentSessionId: 'session_pip_0001', residentId: 'pip', speakerName: 'Pip', voice: 'jake', instructions: 'Pip prompt.',
+      position: { x: 2, y: 0, z: 0 }, shortLivedCredential: 'bai-eph-pip', expiresAt: Math.floor(Date.now() / 1_000) + 60,
+      reactionStream: '/boson-ptt/reaction/stream?residentSessionId=session_pip_0001' },
+    { residentSessionId: 'session_mira_0002', residentId: 'mira', speakerName: 'Mira', voice: 'chloe', instructions: 'Mira prompt.',
+      position: { x: -3, y: 0, z: 0 }, shortLivedCredential: 'bai-eph-mira', expiresAt: Math.floor(Date.now() / 1_000) + 60,
+      reactionStream: '/boson-ptt/reaction/stream?residentSessionId=session_mira_0002' },
+  ] };
+  const requests: Array<{ path: string; body: any }> = [];
+  let micRequests = 0;
+  const client = new NativeResidentAudioClient({
+    fetchImpl: async (path: string, request: any) => {
+      const body = request.body ? JSON.parse(request.body) : {};
+      requests.push({ path, body });
+      if (path === '/boson-ptt/native-audio/activate') return { ok: true, status: 200, json: async () => activation };
+      if (path === '/boson-ptt/native/begin') {
+        beginCount += 1;
+        return { ok: true, status: 200, json: async () => ({ available: true, ...residents[0],
+          reuseSession: beginCount > 1, instructions: `Prompt ${beginCount}` }) };
+      }
+      if (path === '/boson-ptt/reaction/ack') return { ok: true, status: 200, json: async () => ({ accepted: true, status: 'accepted' }) };
+      if (path === '/boson-ptt/reaction/speech/start') return { ok: true, status: 200, json: async () => ({ accepted: true, status: 'started' }) };
+      if (path === '/boson-ptt/reaction/speech/finish') return { ok: true, status: 200, json: async () => ({ accepted: true, status: 'finished' }) };
+      return { ok: true, status: 200, json: async () => ({ accepted: true }) };
+    },
+    WebSocketClass: FakeSocket as any, AudioContextClass: FakeAudioContext as any, AudioWorkletNodeClass: FakeWorkletNode as any,
+    EventSourceClass: FakeEventSource as any, getPositionSocket: () => null,
+    mediaDevices: { getUserMedia: async () => { micRequests += 1; return { getTracks: () => [{ stop() {} }] }; } },
+  });
+  await client.beginHeldTurn('key');
+  const firstTurn = client.turn;
+  client.releaseHeldTurn();
+  await client.handleRealtimeEvent(firstTurn.connection, { type: 'input_audio_buffer.committed' });
+  await client.handleRealtimeEvent(firstTurn.connection, { type: 'response.done', response: { id: 'ptt-first', status: 'completed' } });
+  await settle(); await settle();
+
+  const pip = client.connections.get('session_pip_0001');
+  const mira = client.connections.get('session_mira_0002');
+  FakeEventSource.instances.find((stream) => stream.url.includes('session_pip_0001'))!.event('native-reaction', {
+    version: 1, type: 'native.reaction.dispatch', reactionId: 'reaction-pip', eventId: 'event-pip', residentId: 'pip',
+    context: 'Mira said the bakery is open.', causalDepth: 1, expiresAt: Date.now() + 30_000,
+  });
+  FakeEventSource.instances.find((stream) => stream.url.includes('session_mira_0002'))!.event('native-reaction', {
+    version: 1, type: 'native.reaction.dispatch', reactionId: 'reaction-mira', eventId: 'event-mira', residentId: 'mira',
+    context: 'Pip said the garden needs water.', causalDepth: 1, expiresAt: Date.now() + 30_000,
+  });
+  await settle(); await settle();
+  for (const [connection, responseId, itemId] of [[pip, 'response-pip', 'item-pip'], [mira, 'response-mira', 'item-mira']] as const) {
+    await client.handleRealtimeEvent(connection, { type: 'response.created', response: { id: responseId } });
+    await client.handleRealtimeEvent(connection, { type: 'response.output_audio_transcript.delta', response_id: responseId, item_id: itemId, delta: 'A short line.' });
+    await client.handleRealtimeEvent(connection, { type: 'response.output_audio.delta', response_id: responseId, item_id: itemId,
+      content_index: 0, delta: encodePcm16(new Float32Array(2_400)) });
+  }
+  assert.equal(client.mixer.utterances.size, 2);
+
+  const startingPtt = client.beginHeldTurn('key');
+  await settle();
+  await client.handleRealtimeEvent(pip, { type: 'response.done', response: { id: 'response-pip', status: 'cancelled' } });
+  await startingPtt;
+  await settle(); await settle();
+  assert.equal(client.turn.residentSessionId, 'session_pip_0001');
+  assert.ok(pip.socket.sent.some(({ type }) => type === 'response.cancel'), 'PTT cancels the selected resident response');
+  assert.ok(requests.some(({ path, body }) => path === '/boson-ptt/reaction/speech/finish'
+    && body.reactionId === 'reaction-pip' && body.playback === 'interrupted' && !('transcript' in body)));
+  assert.ok([...client.mixer.utterances.values()].some(({ speakerId }) => speakerId === 'mira'),
+    'the other resident keeps speaking while PTT starts for Pip');
+  assert.equal(micRequests, 2);
   client.stop();
 });
 
