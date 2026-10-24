@@ -161,6 +161,15 @@ test('trusted PTT gesture bootstraps bounded reaction sessions without a second 
   assert.equal(client.connections.size, 2);
   assert.equal(FakeEventSource.instances.length, 2);
   assert.equal(micRequests(), 1, 'only the held PTT turn opens microphone capture');
+  client.updateResidentPositions(JSON.stringify({ type: 'village.residents', timestamp: Date.now(), playerPosition: { x: 0, y: 0, z: 0 },
+    residents: [
+      { residentId: 'pip', position: { x: 30, y: 0, z: 0 } },
+      { residentId: 'mira', position: { x: -3, y: 0, z: 0 } },
+    ] }));
+  assert.equal(client.connections.has('session_pip_0001'), false, 'a resident outside the server activation radius is retired');
+  assert.equal(client.connections.has('session_mira_0002'), true, 'other nearby resident sessions remain connected');
+  assert.equal(FakeEventSource.instances.find((stream) => stream.url.includes('session_pip_0001'))?.closed, true);
+  assert.equal(client.held, false, 'out-of-range retirement releases the held microphone session');
   client.stop();
   await settle();
   assert.ok(requests.some(({ path, body }) => path === '/boson-ptt/native-audio/deactivate' && body.activationId === 'activation-1'));
