@@ -56,6 +56,8 @@ export interface ResidentIntentContext {
   tick: number;
   /** Optional identity of the in-range utterance that should ground this response. */
   heardClaimEventId?: string;
+  /** Optional identity of the recent in-range player intent that should ground this response. */
+  heardPlayerIntentEventId?: string;
 }
 
 export interface SelectedResidentIntent {
@@ -123,6 +125,7 @@ interface AuthoredBeat {
   requiredLocation: string;
   requiredFactIds: readonly FactId[];
   requiredHeardClaim?: { sourceId: string; factId: FactId };
+  requiredHeardPlayerIntent?: { intent: PlayerIntent; topic: VillageTopic };
   minimumTrust: number;
   cooldownTicks: number;
   expiresInTicks: number;
@@ -133,6 +136,7 @@ interface AuthoredBeat {
 }
 
 const RESPONSE_COOLDOWN_TICKS = 3_000;
+const PLAYER_INTENT_MEMORY_WINDOW_MS = 120_000;
 const AUTHORED_BEATS: readonly AuthoredBeat[] = [
   {
     id: 'mira-disclose-sighting', residentId: 'mira', priority: 100,
@@ -157,6 +161,15 @@ const AUTHORED_BEATS: readonly AuthoredBeat[] = [
     cooldownTicks: 3_000, expiresInTicks: 5_000, modelSelectableLine: true,
     lineSummary: 'A guarded offer to help with a practical garden task.',
     action: { kind: 'continue_routine', waypointId: 'west-garden' }, lineId: 'mira-garden-help-reply',
+  },
+  {
+    id: 'mira-heard-garden-help', residentId: 'mira', priority: 80,
+    requiredIntent: ['greet'], requiredTopics: ['general'],
+    requiredLocation: 'west-garden', requiredFactIds: [],
+    requiredHeardPlayerIntent: { intent: 'ask_for_help', topic: 'garden' }, minimumTrust: 1,
+    cooldownTicks: 60_000, expiresInTicks: 5_000, modelSelectableLine: false,
+    lineSummary: 'A local follow-up to the player’s recent request for help with the seedlings.',
+    action: { kind: 'idle' }, lineId: 'mira-heard-garden-help',
   },
   {
     id: 'tobin-guarded-route-reply', residentId: 'tobin', priority: 20,
@@ -188,6 +201,7 @@ const AUTHORED_LINES = Object.freeze({
   'mira-sighting-disclosure': `I saw ${RESIDENT_DISPLAY_NAMES.pip} come back along the garden path before dawn. I was afraid to say so.`,
   'mira-guarded-garden-reply': 'The seedlings are safer uphill. I have work to finish before we talk more.',
   'mira-garden-help-reply': 'I could use help checking the seedlings. Stay on the garden path, please.',
+  'mira-heard-garden-help': 'You asked about helping in the garden earlier. I could use another pair of hands checking the seedlings.',
   'tobin-guarded-route-reply': 'The map shows the route. It does not tell me who drove the cart.',
   'pip-guarded-bakery-reply': 'The oven needs watching. There is warm bread when the work is done.',
   'pip-heard-route-from-tobin': 'Tobin marked a flour cart path on his map. I heard him say it, but I have not checked that route myself.',
@@ -220,6 +234,21 @@ export function latestHeardClaimEventId(
 ): string | undefined {
   const claims = state.residents[residentId]?.heardClaims ?? [];
   return [...claims].reverse().find((claim) => claim.sourceId === sourceId && claim.claimedFactId === claimedFactId)?.eventId;
+}
+
+/** Returns a recent player-intent event stored in this resident’s own memory. */
+export function latestHeardPlayerIntentEventId(
+  state: VillageCognitionState,
+  residentId: string,
+  intent: PlayerIntent,
+  topic: VillageTopic,
+  now: number,
+): string | undefined {
+  const claims = state.residents[residentId]?.heardClaims ?? [];
+  return claims
+    .filter((claim) => claim.sourceId === 'player' && claim.intent === intent && claim.topic === topic &&
+      now >= claim.tick && now - claim.tick <= PLAYER_INTENT_MEMORY_WINDOW_MS)
+    .sort((left, right) => right.tick - left.tick)[0]?.eventId;
 }
 
 export function reduceVillageObservation(state: VillageCognitionState, observation: VillageObservation): VillageCognitionState {
@@ -285,6 +314,7 @@ export function getResidentKnowledgeContext(
   const responseOptions = AUTHORED_BEATS
     .filter((beat) => beat.residentId === residentId && beat.modelSelectableLine && beat.requiredFactIds.every((factId) => factIds.includes(factId)) &&
       (!beat.requiredHeardClaim || hasHeardClaim(resident, beat.requiredHeardClaim, scene?.heardClaimEventId)) &&
+      (!beat.requiredHeardPlayerIntent || hasHeardPlayerIntent(resident, beat.requiredHeardPlayerIntent, scene)) &&
       (!beat.requiredHeardClaim || !scene || scene.locationId === beat.requiredLocation))
     .map(({ lineId, lineSummary, requiredIntent, requiredTopics }) => ({
       lineId, summary: lineSummary, allowedIntents: requiredIntent, topics: requiredTopics,
@@ -307,6 +337,17 @@ function hasHeardClaim(
 ): boolean {
   return resident.heardClaims.some((claim) => claim.sourceId === required.sourceId && claim.claimedFactId === required.factId &&
     (eventId === undefined || claim.eventId === eventId));
+}
+
+function hasHeardPlayerIntent(
+  resident: ResidentCognition,
+  required: NonNullable<AuthoredBeat['requiredHeardPlayerIntent']>,
+  context?: ResidentIntentContext,
+): boolean {
+  const now = context?.tick ?? Date.now();
+  return resident.heardClaims.some((claim) => claim.sourceId === 'player' && claim.intent === required.intent &&
+    claim.topic === required.topic && now >= claim.tick && now - claim.tick <= PLAYER_INTENT_MEMORY_WINDOW_MS &&
+    (context?.heardPlayerIntentEventId === undefined || claim.eventId === context.heardPlayerIntentEventId));
 }
 
 function isFactDisclosable(
@@ -390,6 +431,7 @@ function eligibleBeats(state: VillageCognitionState, context: ResidentIntentCont
       beat.requiredLocation === context.locationId && beat.minimumTrust <= resident.trust &&
       beat.requiredFactIds.every((factId) => resident.knownFactIds.includes(factId)) &&
       (!beat.requiredHeardClaim || hasHeardClaim(resident, beat.requiredHeardClaim, context.heardClaimEventId)) &&
+      (!beat.requiredHeardPlayerIntent || hasHeardPlayerIntent(resident, beat.requiredHeardPlayerIntent, context)) &&
       (lastCompleted === undefined || context.tick - lastCompleted >= beat.cooldownTicks);
   });
 }

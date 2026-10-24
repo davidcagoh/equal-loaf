@@ -6,6 +6,7 @@ import {
   createVillageCognitionState,
   getResidentKnowledgeContext,
   latestHeardClaimEventId,
+  latestHeardPlayerIntentEventId,
   isPublicObservableFactId,
   resolvePttResidentIntent,
   reduceVillageObservation,
@@ -271,6 +272,13 @@ function completePttTurn(command: Extract<VillagePttCommand, { type: 'ptt.comple
   const playerIntent = validatedResponse?.playerIntent ?? 'unknown';
   const topic = validatedResponse?.topic ?? 'general';
   const now = Date.now();
+  const heardPlayerIntentEventId = latestHeardPlayerIntentEventId(
+    cognitionState.current,
+    active.residentId,
+    'ask_for_help',
+    'garden',
+    now,
+  );
   const nearbyResidentIds = residentDistances(explorer)
     .filter(({ distance }) => distance <= RESIDENT_HEARING_RADIUS)
     .map(({ residentId }) => residentId);
@@ -299,6 +307,7 @@ function completePttTurn(command: Extract<VillagePttCommand, { type: 'ptt.comple
     locationId,
     tick: now,
     ...(heardClaimEventId ? { heardClaimEventId } : {}),
+    ...(heardPlayerIntentEventId ? { heardPlayerIntentEventId } : {}),
   };
   let intentContext: ResidentIntentContext = { ...localScene, playerIntent: 'greet', topic: 'general' };
   let intent: SelectedResidentIntent | null = null;

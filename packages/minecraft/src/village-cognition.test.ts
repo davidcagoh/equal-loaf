@@ -5,6 +5,7 @@ import {
   authoredLine,
   getResidentKnowledgeContext,
   latestHeardClaimEventId,
+  latestHeardPlayerIntentEventId,
   reduceVillageObservation,
   resolvePttResidentIntent,
   selectResidentIntent,
@@ -113,6 +114,100 @@ test('repeated public claims remain attributed hearsay and private or unauthored
     residentId: 'pip', playerIntent: 'ask_about_known_topic', topic: 'flour', locationId: 'bakery-hearth',
     tick: 10, heardClaimEventId: 'private-claim',
   }, 11), null);
+});
+
+test('a nearby trusted resident later reacts to the player’s recent garden-help request', () => {
+  let state = createVillageCognitionState();
+  state = reduceVillageObservation(state, {
+    type: 'player.behavior', eventId: 'mira-trust-1', tick: 1,
+    recipientIds: ['mira'], behavior: 'respectful_exchange',
+  });
+  const context = {
+    residentId: 'mira', playerIntent: 'greet' as const, topic: 'general' as const,
+    locationId: 'west-garden', tick: 30_000,
+  };
+  const ordinary = selectResidentIntent(state, context, 20);
+  assert.equal(ordinary?.beatId, 'mira-guarded-garden-reply');
+
+  const request: VillageObservation = {
+    type: 'player.intent', eventId: 'player-garden-help-1', tick: 20_000,
+    recipientIds: ['mira', 'tobin'], intent: 'ask_for_help', topic: 'garden',
+  };
+  state = reduceVillageObservation(state, request);
+  state = reduceVillageObservation(state, request);
+  assert.equal(state.residents.mira?.heardClaims.length, 1);
+  state = reduceVillageObservation(state, { ...request, eventId: 'player-garden-help-2', tick: 21_000 });
+  assert.equal(state.residents.mira?.heardClaims.length, 2);
+  assert.equal(state.residents.mira?.trust, 1);
+  assert.equal(state.residents.pip?.heardClaims.length, 0);
+  assert.equal(state.residents.mira?.knownFactIds.includes('mira-sighting'), true);
+  const heardEventId = latestHeardPlayerIntentEventId(state, 'mira', 'ask_for_help', 'garden', 30_000);
+  assert.equal(heardEventId, 'player-garden-help-2');
+  assert.equal(latestHeardPlayerIntentEventId(state, 'pip', 'ask_for_help', 'garden', 30_000), undefined);
+
+  const response = selectResidentIntent(state, {
+    ...context,
+    heardPlayerIntentEventId: heardEventId,
+  }, 20);
+  assert.ok(response);
+  assert.equal(response?.beatId, 'mira-heard-garden-help');
+  assert.deepEqual(response?.action, { kind: 'idle' });
+  assert.deepEqual(response?.speech, { kind: 'authored_line', lineId: 'mira-heard-garden-help' });
+  assert.equal(authoredLine(response?.speech.lineId ?? ''), 'You asked about helping in the garden earlier. I could use another pair of hands checking the seedlings.');
+  assert.deepEqual(response?.allowedFactIds, ['silent-bell', 'seedlings-safe']);
+  assert.equal(validateResidentIntent(state, response, { ...context, heardPlayerIntentEventId: heardEventId }), true);
+  assert.equal(selectResidentIntent(state, context, 20)?.beatId, 'mira-heard-garden-help');
+  const pipContext = { residentId: 'pip', playerIntent: 'greet' as const, topic: 'general' as const, locationId: 'bakery-hearth', tick: 30_000 };
+  assert.equal(selectResidentIntent(state, pipContext, 20)?.beatId, 'pip-guarded-bakery-reply');
+  const resolved = resolvePttResidentIntent(state, {
+    residentId: 'mira', locationId: 'west-garden', tick: context.tick, heardPlayerIntentEventId: heardEventId,
+  }, 20, { playerIntent: 'greet', topic: 'general', lineId: 'mira-guarded-garden-reply' });
+  assert.equal(resolved?.intent.beatId, 'mira-heard-garden-help');
+
+  const completed = reduceVillageObservation(state, {
+    type: 'beat.completed', eventId: 'mira-garden-help-done', tick: context.tick,
+    residentId: 'mira', beatId: 'mira-heard-garden-help',
+  });
+  const repeatedRequest = reduceVillageObservation(completed, {
+    ...request, eventId: 'player-garden-help-3', tick: context.tick + 1,
+  });
+  assert.equal(selectResidentIntent(repeatedRequest, { ...context, tick: context.tick + 10_000 }, 20)?.beatId, 'mira-guarded-garden-reply');
+});
+
+test('player-intent memory must be recent, recipient-owned, and relationship-eligible', () => {
+  const initial = createVillageCognitionState();
+  const asked = reduceVillageObservation(initial, {
+    type: 'player.intent', eventId: 'old-garden-help', tick: 10,
+    recipientIds: ['mira'], intent: 'ask_for_help', topic: 'garden',
+  });
+  const scene = {
+    residentId: 'mira', playerIntent: 'greet' as const, topic: 'general' as const,
+    locationId: 'west-garden', tick: 120_011,
+  };
+  assert.equal(latestHeardPlayerIntentEventId(asked, 'mira', 'ask_for_help', 'garden', scene.tick), undefined);
+  assert.equal(selectResidentIntent(asked, { ...scene, heardPlayerIntentEventId: 'old-garden-help' }, 21)?.beatId, 'mira-guarded-garden-reply');
+
+  const fresh = reduceVillageObservation(createVillageCognitionState(), {
+    type: 'player.intent', eventId: 'fresh-garden-help', tick: 100_000,
+    recipientIds: ['mira'], intent: 'ask_for_help', topic: 'garden',
+  });
+  assert.equal(latestHeardPlayerIntentEventId(fresh, 'mira', 'ask_for_help', 'garden', 120_000), 'fresh-garden-help');
+  assert.equal(selectResidentIntent(fresh, {
+    ...scene, tick: 120_000, heardPlayerIntentEventId: 'fresh-garden-help',
+  }, 21)?.beatId, 'mira-guarded-garden-reply');
+  assert.equal(latestHeardPlayerIntentEventId(fresh, 'mira', 'ask_for_help', 'flour', 120_000), undefined);
+  assert.equal(latestHeardPlayerIntentEventId(fresh, 'pip', 'ask_for_help', 'garden', 120_000), undefined);
+
+  const trusted = reduceVillageObservation(fresh, {
+    type: 'player.behavior', eventId: 'mira-trust-2', tick: 100_001,
+    recipientIds: ['mira'], behavior: 'respectful_exchange',
+  });
+  assert.equal(selectResidentIntent(trusted, {
+    ...scene, tick: 120_000, heardPlayerIntentEventId: 'fresh-garden-help',
+  }, 21)?.beatId, 'mira-heard-garden-help');
+  assert.equal(selectResidentIntent(trusted, {
+    ...scene, tick: 120_000, heardPlayerIntentEventId: 'unrelated-event',
+  }, 21)?.beatId, 'mira-guarded-garden-reply');
 });
 
 test('only public observable facts can become verified knowledge through direct observation', () => {
