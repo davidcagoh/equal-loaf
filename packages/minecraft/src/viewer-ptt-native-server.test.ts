@@ -127,6 +127,7 @@ test('native voice turns bind resident sessions, issue credentials once, and for
     assert.equal(first.reuseSession, false);
     assert.equal(typeof first.turnId, 'string');
     assert.equal(typeof first.residentSessionId, 'string');
+    assert.equal(first.voice, 'jake', 'the server selects the trusted voice for Thomas');
     assert.equal(first.providerSecret, undefined);
     assert.equal(providerCalls, 0);
     assert.match(String(first.instructions), /Anna said: “The garden workers brought vegetables\.”/);
@@ -203,6 +204,7 @@ test('native voice turns bind resident sessions, issue credentials once, and for
     const anna = await annaResponse.json() as Record<string, unknown>;
     assert.equal(annaResponse.status, 200);
     assert.equal(anna.residentId, 'mira');
+    assert.equal(anna.voice, 'chloe', 'the server selects the trusted voice for Anna');
     assert.notEqual(anna.residentSessionId, first.residentSessionId, 'Anna receives an independent persistent conversation session');
     assert.equal(anna.reuseSession, false);
     assert.match(String(anna.instructions), /Garden workers bring vegetables/);

@@ -3,6 +3,7 @@ import { createConnection } from 'node:net';
 import type { IncomingMessage, ServerResponse } from 'node:http';
 import { PLAYER_INTENTS, VILLAGE_TOPICS } from './village-vocabulary.js';
 import { buildNativeResidentInstructions } from './native-resident-context.ts';
+import { RESIDENT_VOICES } from './audio/higgs-tts.js';
 
 const REALTIME_CLIENT_SECRETS_URL = 'https://api.boson.ai/v1/realtime/client_secrets';
 const REALTIME_SECRET_TTL_SECONDS = 300;
@@ -481,6 +482,13 @@ export function createPttServer(port: number): PttServer {
         return;
       }
 
+      const voice = RESIDENT_VOICES[ack.resident.id as keyof typeof RESIDENT_VOICES];
+      if (!voice) {
+        await requestVillageIpc({ version: 1, type: 'ptt.cancel', turnId, at: Date.now() }).catch(() => undefined);
+        respond(response, 503, { available: false, error: 'A voice is not configured for this resident.' });
+        return;
+      }
+
       const existingSession = residentSessionByResident.get(ack.resident.id);
       const reuseSession = Boolean(existingSession && body.knownResidentSessionIds.includes(existingSession.id));
       const binding = reuseSession && existingSession
@@ -517,6 +525,7 @@ export function createPttServer(port: number): PttServer {
         residentSessionId: binding.id,
         residentId: ack.resident.id,
         speakerName: ack.resident.name,
+        voice,
         reuseSession,
         instructions: buildNativeResidentInstructions(ack.resident),
         maxHoldMs: 30_000,
