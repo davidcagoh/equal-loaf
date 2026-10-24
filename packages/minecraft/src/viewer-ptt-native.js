@@ -10,6 +10,8 @@ const MAX_OUTPUT_TRANSCRIPT_CHARS = 1_000;
 const MAX_PENDING_PCM_REMAINDERS = 64;
 const MAX_NATIVE_REACTION_SESSIONS = 4;
 const MAX_NATIVE_REACTION_CONTEXT_BYTES = 2_000;
+const NATIVE_REACTION_RADIUS = 24;
+const RESIDENT_SNAPSHOT_MAX_AGE_MS = 1_500;
 
 export class NativeResidentAudioClient {
   constructor({
@@ -817,11 +819,24 @@ export class NativeResidentAudioClient {
     let event;
     try { event = JSON.parse(raw); } catch { return; }
     if (event?.type !== 'village.residents' || !Array.isArray(event.residents)) return;
+    const currentResidentIds = new Set();
     for (const resident of event.residents) {
       if (typeof resident?.residentId !== 'string' || !validPosition(resident.position)) continue;
+      currentResidentIds.add(resident.residentId);
       const position = { ...resident.position };
       this.residentPositions.set(resident.residentId, position);
       this.mixer?.setSpeakerPosition(resident.residentId, position);
+    }
+    const snapshotFresh = Number.isSafeInteger(event.timestamp)
+      && Math.abs(Date.now() - event.timestamp) <= RESIDENT_SNAPSHOT_MAX_AGE_MS;
+    if (!snapshotFresh || !validPosition(event.playerPosition)) return;
+    for (const connection of this.connections.values()) {
+      if (!connection.activationSession) continue;
+      const position = this.residentPositions.get(connection.residentId);
+      if (!currentResidentIds.has(connection.residentId) || !position
+        || distance3d(event.playerPosition, position) > NATIVE_REACTION_RADIUS) {
+        this.#failConnection(connection, 'reaction_session_out_of_range');
+      }
     }
   }
 
@@ -1053,7 +1068,10 @@ function structuredPttFailure(path, status, payload) {
   if (path === '/boson-ptt/native/credential') return `native_credential_http_${status}`;
   return `native_request_http_${status}`;
 }
-function validPosition(value) { return Boolean(value && ['x', 'y', 'z'].every((key) => Number.isFinite(value[key]))); }
+function validPosition(value) { return Boolean(value && ['x', 'y', 'z'].every((key) => Number.isFinite(value[key]) && Math.abs(value[key]) <= 1_000_000)); }
+function distance3d(left, right) {
+  return Math.hypot(left.x - right.x, left.y - right.y, left.z - right.z);
+}
 function appendBounded(previous, next, max) { return `${previous ?? ''}${next}`.slice(0, max); }
 function utf8Length(value) { return new TextEncoder().encode(value).length; }
 function isEditable(target) {
