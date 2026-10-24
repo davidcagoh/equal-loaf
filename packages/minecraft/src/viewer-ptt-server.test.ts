@@ -7,7 +7,13 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import test from 'node:test';
 import { createPttServer, isPttBeginAck, isPttModelResponse, isSameOriginPttRequest } from './viewer-ptt-server.ts';
-import { createVillageCognitionState, getResidentKnowledgeContext, selectResidentIntent } from './village-cognition.ts';
+import {
+  createVillageCognitionState,
+  getResidentKnowledgeContext,
+  reduceVillageObservation,
+  resolvePttResidentIntent,
+  selectResidentIntent,
+} from './village-cognition.ts';
 
 test('PTT model output must use a canonical intent, topic, and compatible resident authored line', () => {
   const turn = { responseOptions: [
@@ -60,24 +66,34 @@ test('validated begin context and model response select the same locally authore
   assert.equal(intent?.speech.kind === 'authored_line' ? intent.speech.lineId : null, option.lineId);
 });
 
-test('HTTP begin returns validated line IDs through the private UDS bridge without provider traffic', async () => {
+test('HTTP begin and complete carry a safe choice over UDS and resolve private story locally without provider traffic', async () => {
   const originalKey = process.env.BOSON_API_KEY;
+  const originalPttEnvFile = process.env.BOSON_PTT_ENV_FILE;
   const originalSocketPath = process.env.BOSON_VILLAGE_IPC_SOCKET;
   const originalFetch = globalThis.fetch;
   const directory = await mkdtemp(join(tmpdir(), 'boson-ptt-test-'));
   const socketPath = join(directory, 'village.sock');
+  delete process.env.BOSON_PTT_ENV_FILE;
   process.env.BOSON_API_KEY = 'synthetic-test-key';
   process.env.BOSON_VILLAGE_IPC_SOCKET = socketPath;
   let providerCalls = 0;
+  const ipcCommands: Array<{ type: string; response?: unknown }> = [];
+  let selectedLocalLineId: string | undefined;
+  let state = createVillageCognitionState();
+  state = reduceVillageObservation(state, { type: 'player.behavior', eventId: 'fixture-trust-1', tick: 1, recipientIds: ['mira'], behavior: 'respectful_exchange' });
+  state = reduceVillageObservation(state, { type: 'player.behavior', eventId: 'fixture-trust-2', tick: 2, recipientIds: ['mira'], behavior: 'respectful_exchange' });
+  const knowledge = getResidentKnowledgeContext(state, 'mira');
+  assert.equal(knowledge.factIds.includes('mira-sighting'), false);
+  assert.equal(knowledge.responseOptions.some(({ lineId }) => lineId === 'mira-sighting-disclosure'), false);
   globalThis.fetch = (async () => {
     providerCalls += 1;
     return { ok: true, json: async () => ({ value: 'bai-eph-test', expires_at: Math.floor(Date.now() / 1_000) + 60 }) } as Response;
   }) as typeof fetch;
 
   const resident = {
-    id: 'mira', name: 'Mira', role: 'gardener', goal: 'Care for seedlings', locationId: 'west-garden',
-    topics: ['general'], facts: [], relationship: 'unfamiliar',
-    responseOptions: [{ lineId: 'mira-greeting', summary: 'A greeting', allowedIntents: ['greet'], topics: ['general'] }],
+    id: 'mira', name: 'Mira', role: 'gardener', goal: knowledge.goal, locationId: 'west-garden',
+    topics: [...knowledge.topics], facts: [...knowledge.facts], relationship: knowledge.relationship,
+    responseOptions: knowledge.responseOptions.map((option) => ({ ...option })),
   };
   const ipcServer = createIpcServer((socket) => {
     let buffer = '';
@@ -86,11 +102,19 @@ test('HTTP begin returns validated line IDs through the private UDS bridge witho
       buffer += chunk;
       const newline = buffer.indexOf('\n');
       if (newline < 0) return;
-      const command = JSON.parse(buffer.slice(0, newline)) as { type: string; turnId: string };
-      const phase = command.type === 'ptt.begin' ? 'begin' : 'cancel';
-      const ack = phase === 'begin'
-        ? { version: 1, type: 'ptt.ack', phase, turnId: command.turnId, status: 'ready', resident }
-        : { version: 1, type: 'ptt.ack', phase, turnId: command.turnId, status: 'cancelled' };
+      const command = JSON.parse(buffer.slice(0, newline)) as { type: string; turnId: string; response?: unknown };
+      ipcCommands.push({ type: command.type, ...(command.response ? { response: command.response } : {}) });
+      if (command.type === 'ptt.complete') {
+        const resolved = resolvePttResidentIntent(state, {
+          residentId: resident.id, locationId: resident.locationId, tick: 3,
+        }, 7, command.response);
+        selectedLocalLineId = resolved?.intent.speech.kind === 'authored_line' ? resolved.intent.speech.lineId : undefined;
+        socket.end(`${JSON.stringify({ version: 1, type: 'ptt.ack', phase: 'complete', turnId: command.turnId, status: resolved ? 'accepted' : 'rejected' })}\n`);
+        return;
+      }
+      const ack = command.type === 'ptt.begin'
+        ? { version: 1, type: 'ptt.ack', phase: 'begin', turnId: command.turnId, status: 'ready', resident }
+        : { version: 1, type: 'ptt.ack', phase: 'cancel', turnId: command.turnId, status: 'cancelled' };
       socket.end(`${JSON.stringify(ack)}\n`);
     });
   });
@@ -119,15 +143,22 @@ test('HTTP begin returns validated line IDs through the private UDS bridge witho
     });
     const setup = await response.json() as Record<string, unknown>;
     assert.equal(response.status, 200);
-    assert.deepEqual(setup.allowedLineIds, ['mira-greeting']);
+    assert.deepEqual(setup.allowedLineIds, ['mira-guarded-garden-reply', 'mira-garden-help-reply']);
     assert.equal(setup.available, true);
+    assert.equal(JSON.stringify(setup).includes('mira-sighting'), false);
     assert.equal(providerCalls, 1);
 
-    const cancelled = await originalFetch(`${origin}/boson-ptt/cancel`, {
+    const completed = await originalFetch(`${origin}/boson-ptt/complete`, {
       method: 'POST', headers: { Origin: origin, 'Sec-Fetch-Site': 'same-origin', 'Content-Type': 'application/json' },
-      body: JSON.stringify({ turnId: setup.turnId }),
+      body: JSON.stringify({ turnId: setup.turnId, response: {
+        playerIntent: 'ask_about_known_topic', topic: 'garden', lineId: 'mira-guarded-garden-reply',
+      } }),
     });
-    assert.equal(cancelled.status, 200);
+    assert.equal(completed.status, 200);
+    assert.deepEqual(await completed.json(), { accepted: true, status: 'accepted' });
+    assert.deepEqual(ipcCommands.map(({ type }) => type), ['ptt.begin', 'ptt.complete']);
+    assert.equal(selectedLocalLineId, 'mira-sighting-disclosure');
+    assert.equal(providerCalls, 1);
   } finally {
     ptt?.close();
     await new Promise<void>((resolve) => httpServer.close(() => resolve()));
@@ -135,6 +166,8 @@ test('HTTP begin returns validated line IDs through the private UDS bridge witho
     await rm(directory, { recursive: true, force: true });
     if (originalKey === undefined) delete process.env.BOSON_API_KEY;
     else process.env.BOSON_API_KEY = originalKey;
+    if (originalPttEnvFile === undefined) delete process.env.BOSON_PTT_ENV_FILE;
+    else process.env.BOSON_PTT_ENV_FILE = originalPttEnvFile;
     if (originalSocketPath === undefined) delete process.env.BOSON_VILLAGE_IPC_SOCKET;
     else process.env.BOSON_VILLAGE_IPC_SOCKET = originalSocketPath;
     globalThis.fetch = originalFetch;
