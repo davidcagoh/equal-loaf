@@ -1,5 +1,7 @@
 import assert from 'node:assert/strict';
+import { createHash } from 'node:crypto';
 import { createRequire } from 'node:module';
+import { createConnection } from 'node:net';
 import { createServer, type IncomingMessage, type Server } from 'node:http';
 import type { Duplex } from 'node:stream';
 import test from 'node:test';
@@ -224,5 +226,70 @@ test('sends the current companion position to a viewer client without waiting fo
   } finally {
     socket.disconnect();
     bot.viewer?.close();
+  }
+});
+
+test('stops the viewer promptly with an open WebSocket client', async () => {
+  const probe = createServer();
+  probe.listen(0);
+  await new Promise<void>((resolve) => probe.once('listening', resolve));
+  const address = probe.address();
+  assert.ok(address && typeof address !== 'string');
+  const port = address.port;
+  await new Promise<void>((resolve, reject) => probe.close((error) => error ? reject(error) : resolve()));
+
+  const server = createServer();
+  let viewerSocket: Duplex | undefined;
+  server.on('upgrade', (_request, socket) => {
+    viewerSocket = socket;
+    const key = _request.headers['sec-websocket-key'];
+    assert.equal(typeof key, 'string');
+    const accept = createHash('sha1').update(`${key}258EAFA5-E914-47DA-95CA-C5AB0DC85B11`).digest('base64');
+    socket.write(`HTTP/1.1 101 Switching Protocols\r\nUpgrade: websocket\r\nConnection: Upgrade\r\nSec-WebSocket-Accept: ${accept}\r\n\r\n`);
+  });
+  const stop = await startLoopbackViewer({}, port, (_bot, options) => server.listen(options.port, () => undefined));
+  const socket = createConnection(port, '127.0.0.1');
+  let stopPromise: Promise<void> | undefined;
+  let stopTimeout: NodeJS.Timeout | undefined;
+  let handshakeTimeout: NodeJS.Timeout | undefined;
+  try {
+    await new Promise<void>((resolve, reject) => {
+      socket.once('connect', () => {
+        handshakeTimeout = setTimeout(() => reject(new Error('Viewer WebSocket handshake timed out')), 3_000);
+        socket.once('data', (data) => {
+          if (handshakeTimeout) clearTimeout(handshakeTimeout);
+          if (data.toString().startsWith('HTTP/1.1 101')) resolve();
+          else reject(new Error('Viewer did not accept the WebSocket handshake'));
+        });
+        socket.write([
+          'GET /socket.io/?EIO=4&transport=websocket HTTP/1.1',
+          `Host: 127.0.0.1:${port}`,
+          `Origin: http://127.0.0.1:${port}`,
+          'Upgrade: websocket',
+          'Connection: Upgrade',
+          'Sec-WebSocket-Version: 13',
+          'Sec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==',
+          '',
+          '',
+        ].join('\r\n'));
+      });
+      socket.once('error', reject);
+    });
+
+    await Promise.race([
+      (stopPromise = stop()),
+      new Promise<never>((_resolve, reject) => {
+        stopTimeout = setTimeout(() => reject(new Error('Viewer shutdown waited on an open WebSocket')), 1_000);
+      }),
+    ]);
+    assert.equal(server.listening, false);
+    assert.equal(viewerSocket?.destroyed, true);
+  } finally {
+    if (stopTimeout) clearTimeout(stopTimeout);
+    if (handshakeTimeout) clearTimeout(handshakeTimeout);
+    socket.destroy();
+    viewerSocket?.destroy();
+    if (stopPromise) await stopPromise;
+    else await stop();
   }
 });

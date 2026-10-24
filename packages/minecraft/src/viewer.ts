@@ -19,6 +19,7 @@ function restrictViewerRequests(server: Server, port: number): () => void {
   const framePolicy = "frame-ancestors http://127.0.0.1:8000 http://localhost:8000";
   const originalEmit = server.emit;
   const dialogueClients = new Set<ServerResponse>();
+  const viewerClients = new Set<Duplex>();
   const viewerIndex = readFileSync(require.resolve('prismarine-viewer/public/index.html'), 'utf8');
   const viewerPage = viewerIndex.replace('</body>', '<script src="/socket.io/socket.io.js"></script><script type="module" src="/boson-audio.js"></script></body>');
 
@@ -94,6 +95,8 @@ function restrictViewerRequests(server: Server, port: number): () => void {
         socket.end('HTTP/1.1 403 Forbidden\r\nConnection: close\r\n\r\n');
         return true;
       }
+      viewerClients.add(socket);
+      socket.once('close', () => viewerClients.delete(socket));
     }
     return Reflect.apply(originalEmit, this, [eventName, ...args]);
   } as typeof server.emit;
@@ -101,6 +104,8 @@ function restrictViewerRequests(server: Server, port: number): () => void {
   return () => {
     for (const client of dialogueClients) client.end();
     dialogueClients.clear();
+    for (const client of viewerClients) client.destroy();
+    viewerClients.clear();
   };
 }
 
