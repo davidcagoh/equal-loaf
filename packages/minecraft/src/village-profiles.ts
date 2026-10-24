@@ -19,6 +19,8 @@ export interface DialogueTurn {
   line: string;
 }
 
+export interface MysteryTurn extends DialogueTurn { clueId: string }
+
 export const villageProfiles: readonly VillagerProfile[] = [
   {
     id: 'mira',
@@ -29,7 +31,7 @@ export const villageProfiles: readonly VillagerProfile[] = [
       { id: 'market-well', place: 'market well', offset: [2, -1] },
       { id: 'seed-shed', place: 'seed shed', offset: [7, 4] },
     ],
-    pauseMs: 18_000,
+    pauseMs: 12_000,
   },
   {
     id: 'tobin',
@@ -40,7 +42,7 @@ export const villageProfiles: readonly VillagerProfile[] = [
       { id: 'river-gate', place: 'river gate', offset: [-8, 0] },
       { id: 'market-well', place: 'market well', offset: [2, -1] },
     ],
-    pauseMs: 24_000,
+    pauseMs: 16_000,
   },
   {
     id: 'pip',
@@ -51,7 +53,7 @@ export const villageProfiles: readonly VillagerProfile[] = [
       { id: 'market-well', place: 'market well', offset: [2, -1] },
       { id: 'grain-store', place: 'grain store', offset: [-2, -7] },
     ],
-    pauseMs: 30_000,
+    pauseMs: 20_000,
   },
 ];
 
@@ -66,4 +68,14 @@ export const villageDialogue: readonly DialogueTurn[] = [
   { speakerId: 'mira', listenerId: 'pip', stopId: 'market-well', line: 'The new seedlings are safe uphill; I saved a basket of wheat for your next batch.' },
   { speakerId: 'tobin', listenerId: 'mira', stopId: 'market-well', line: 'I added that higher garden path to the map after seeing your seedlings there.' },
   { speakerId: 'pip', listenerId: 'mira', stopId: 'market-well', line: 'I’ll use that basket for tomorrow’s bread; the seed keepers will get the first loaf.' },
+];
+
+/** Fictional, immutable evidence beats. Models never receive culprit or undiscovered clues. */
+export const villageMysteryDialogue: readonly MysteryTurn[] = [
+  { speakerId: 'mira', listenerId: 'tobin', stopId: 'west-garden', clueId: 'silent-bell', line: 'The dawn bell stayed quiet again. Rowan never missed a morning.' },
+  { speakerId: 'tobin', listenerId: 'pip', stopId: 'map-board', clueId: 'flour-ledger', line: 'The flour ledger is short by two sacks. I have not named anyone.' },
+  { speakerId: 'tobin', listenerId: 'mira', stopId: 'river-gate', clueId: 'route-mark', line: 'A flour cart passed the bell-house path. My map shows the turn, not its driver.' },
+  { speakerId: 'pip', listenerId: 'tobin', stopId: 'bakery-hearth', clueId: 'pip-denial', line: 'I stayed in the bakery all night. The ovens were cold until morning.' },
+  { speakerId: 'mira', listenerId: 'pip', stopId: 'seed-shed', clueId: 'mira-sighting', line: 'Before dawn I saw you return by the garden path. I was afraid to say so.' },
+  { speakerId: 'pip', listenerId: 'mira', stopId: 'bakery-hearth', clueId: 'pip-contradiction', line: 'I only returned to the bakery after dawn, when I relit the hearth.' },
 ];
