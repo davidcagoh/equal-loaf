@@ -24,27 +24,27 @@ One transition should have this shape:
 
 `observed event -> eligible residents' private memory update -> beat eligibility -> selected intent -> bounded action + line intent -> event emitted`
 
-Player speech is just another observed event after the explicit talk control routes it to one nearby resident. Keep speech transport, transcript/audio retention policy, and speech synthesis outside this reducer. Ambient resident events also enter the same path. Drop stale intents and re-check range, path bounds, and eligibility before applying actions.
+Player speech is an observed event after the explicit talk control. Deliver its local semantic event to every in-earshot eligible resident independently so each can update only their own memory; prioritize the nearest eligible resident to take the immediate reply turn. Do not turn response priority into exclusive knowledge delivery. Keep speech transport, transcript/audio retention policy, and speech synthesis outside this reducer. Ambient resident events also enter the same path. Drop stale intents and re-check range, path bounds, and eligibility before applying actions.
 
 ## Authored versus generative responsibility
 
-Authored data owns mystery truth, who knows each clue, disclosure thresholds, beat order constraints, speaker/listener, line intent, and actor-action allowlists. Deterministic rules own sensing, memory updates, eligibility, cooldowns, and action validation. Optional text generation may phrase a selected intent using only the selected resident's permitted facts; it may return silence or fall back to authored text. It cannot choose a new beat, grant knowledge, rewrite beliefs, identify the culprit, accuse the player, or issue a Minecraft command. That keeps story correctness inspectable while leaving voice wording flexible.
+Authored data owns mystery truth, who knows each clue, disclosure thresholds, beat order constraints, speaker/listener, social-intent allowlists, line intent, and actor-action allowlists. Deterministic rules own sensing, memory updates, eligibility, cooldowns, and action validation. The first slice can choose a small authored response intent deterministically. Later, an optional model may suggest one bounded social intent (such as acknowledge, deflect, ask, or disclose an already-known permitted fact) grounded in the selected resident's current facts and relationship; local validation checks knowledge, scene eligibility, and allowed intent before accepting it. It may phrase only the validated intent, return silence, or fall back to authored text. It cannot grant knowledge, rewrite beliefs, identify the culprit, accuse the player, or issue a Minecraft command. That keeps story correctness inspectable while leaving room for social response and wording flexibility.
 
 ## First playable scenario: Quiet Bell, one short scene
 
 1. The explorer arrives during the residents' ordinary morning loops. Mira tends the west beds, Tobin checks the map board, and Pip works near the bakery; these routes continue without dialogue being due.
 2. An ambient beat lets the explorer overhear that Rowan's dawn bell did not ring. Later, Tobin and Pip discuss the flour ledger shortage. These facts are public clues, not a forced quest sequence.
-3. The explorer uses the explicit talk control near Mira. Her response is guarded because the player is unfamiliar; it reflects Mira's seedling-protection goal and does not reveal her private sighting.
+3. The explorer uses the explicit talk control near Mira. Every resident in earshot independently receives the semantic event; Mira is nearest and gets reply priority. Her response is guarded because the player is unfamiliar; it reflects Mira's seedling-protection goal and does not reveal her private sighting.
 4. After a low-pressure exchange near Mira's garden, a locally authored trust/scene condition becomes eligible. Mira chooses to tell the explorer that she saw Pip returning by the garden path before dawn. Her movement to/within the garden and the spoken line share the same intent.
 5. A later overheard bakery exchange gives Pip's timeline contradiction. It is corroboration, not a verdict. The scene ends with residents continuing their day; no mandatory accusation, confession, or combat.
 
-The MVP may omit steps 4–5 if PTT integration is not ready; the core reducer should be exercisable with synthetic typed events and authored utterance events. The live acceptance slice is one resident reacting differently to a relevant observed event while retaining routine movement and coherent speech/action.
+For component acceptance, the core reducer can be exercised with synthetic typed events and authored utterance events. That does not satisfy live-experience acceptance: the eventual Quiet Bell demo includes an explicit PTT exchange, residents' independent in-earshot reactions, and subsequent clue disclosure only when conditions are met. The live acceptance slice keeps routine movement active and makes the nearest resident's spoken response and bounded social/action intent coherent.
 
 ## Local implementation issue proposals
 
 1. **Model resident goals, private knowledge, relationships, and typed observations.** Add focused profile/state types and a pure reducer; define tests for visibility, knowledge isolation, bounded trust changes, and duplicate events. No source behavior calls external AI.
 2. **Select authored reactive beat intents and execute them as a unit.** Separate beat selection from routine cadence; add eligibility, cooldown/expiry, seeded deterministic choice, and action/line-intent emission from one selected beat. Preserve the JSONL `village.dialogue` contract.
-3. **Connect explicit player utterances and overheard events to resident cognition.** Route the current interaction event to the nearest eligible resident and create typed resident/player observations; ensure response choices use only that resident's accessible knowledge and trust. Coordinate viewer/PTT ownership with `.28.10`, `.30`, and `.31` before wiring transport.
+3. **Connect explicit player utterances and overheard events to resident cognition.** Deliver a typed semantic event to all in-earshot eligible residents for independent observation, while prioritizing the nearest eligible resident for an immediate reply; ensure response choices use only each resident's accessible knowledge and relationship. Coordinate viewer/PTT ownership with `.28.10`, `.30`, and `.31` before wiring transport.
 
 ## Acceptance
 
@@ -54,8 +54,8 @@ The MVP may omit steps 4–5 if PTT integration is not ready; the core reducer s
 - A typed observed event can make one authored beat eligible; before/after state yields different resident behavior.
 - A selected beat determines both an allowlisted action and a bounded utterance intent; validation/failure falls back to the routine and authored line.
 - Identical initial state, event sequence, and seed produce the same beat/action/line intent.
-- No model receives hidden solution facts or controls world truth/actions. Model text, if enabled, is constrained to paraphrase the selected line intent or return silence.
-- The live Quiet Bell slice supports overhearing, a nearby talk turn, an appropriately guarded Mira response, and a later clue disclosure only when its conditions are met.
+- No model receives hidden solution facts or controls world truth/actions. A model-suggested social intent and text, if enabled, are validated against the selected resident's known facts and allowed intents, or replaced by authored fallback/silence.
+- Component tests can inject synthetic typed events. The live Quiet Bell slice separately supports PTT, overhearing, independent reactions from in-earshot residents, a nearest-resident guarded Mira response, and later clue disclosure only when its conditions are met.
 
 ## Research and adaptation notes
 
