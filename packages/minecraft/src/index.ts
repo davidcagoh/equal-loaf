@@ -1,5 +1,6 @@
 import { EventEmitter } from 'node:events';
 import type { GameAdapter, Goal, GoalKind, GoalResult, Observation } from '../../contracts/src/index.ts';
+import { startPrismarineViewer } from './viewer.ts';
 
 interface Vec3 { x: number; y: number; z: number; offset?(x: number, y: number, z: number): Vec3 }
 interface EntityLike { position: Vec3; health?: number; username?: string; type?: string; name?: string; kind?: string; isValid?: boolean; metadata?: unknown[] }
@@ -110,6 +111,10 @@ export class MinecraftAdapter implements GameAdapter {
   }
 
   get isReady(): boolean { return this.ready && Boolean(this.bot?.entity); }
+
+  startViewer(port = 3000): Promise<() => Promise<void>> {
+    return startPrismarineViewer(this.requireBot(), port);
+  }
 
   capabilities(): readonly GoalKind[] { return supportedKinds; }
 

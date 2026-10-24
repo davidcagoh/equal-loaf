@@ -1,6 +1,6 @@
 # Boson API demo
 
-This collaborator-provided local demo exercises Boson Realtime, TTS, and Avatar APIs. Realtime can submit whitelisted Minecraft goals to the typed scheduler. The gateway connects a loopback Mineflayer adapter and fails closed when Minecraft is unavailable. The Realtime panel shows adapter readiness, observed player/bot positions and inventory, speech, the current goal, and recent action outcomes, with a local stop control. Keep credentials outside Git; root `.env`, `.api`, `BOSON_API_KEY`, and `BOSON_API_KEY_100` are supported.
+This local demo exercises Boson Realtime, TTS, and Avatar APIs alongside a real Minecraft Java server. Realtime can submit whitelisted goals to the typed scheduler. A browser-rendered 3D view follows the live Mineflayer companion, while the status overlay shows observed player/bot positions and inventory, speech, the current goal, and recent action outcomes, with a local stop control. The 3D renderer is Prismarine Viewer, not the official Minecraft client. Keep credentials outside Git; root `.env`, `.api`, `BOSON_API_KEY`, and `BOSON_API_KEY_100` are supported.
 
 ## Endpoints and workflow fit
 
@@ -16,6 +16,7 @@ The broader workflow is **approved transcript → voice → timing/alignment →
 
 - Python 3.10+, Node.js 22.6+ (tested with 24.12), Java 21+, and a Boson API key with access to the requested endpoints.
 - Install the pinned Mineflayer adapter dependencies with `npm ci --prefix packages/minecraft`. Start the local world in one terminal with `bash scripts/start-minecraft-world.sh`; the configured server runs only on loopback in offline mode.
+- The companion starts Prismarine Viewer on `http://127.0.0.1:3000` by default and binds it to loopback only. Set `BOSON_VIEWER_PORT` if that local port is occupied. The viewer package's upstream support list currently ends at 1.21.4; this project pins 1.33.0 and smoke-checks its rendering against the local 1.21.11 world, so recheck the view after dependency or server upgrades.
 - A Minecraft account is not required for the companion. To provide an account-free moving target, run `npm --prefix packages/minecraft run demo-player` in a second terminal and set `BOSON_MC_PLAYER=DemoPlayer` when starting the companion.
 - Put the key in the ignored project-root `.env` as `BOSON_API_KEY_100`, or set `BOSON_API_KEY` in the environment. Never commit or paste the key.
 - Browser microphone audio is sent directly to Boson while the Realtime session is active. Grant browser access only when ready; stop the session when finished.
@@ -25,7 +26,7 @@ The broader workflow is **approved transcript → voice → timing/alignment →
   bash scripts/start-companion-demo.sh
   ```
 
-- Open `http://127.0.0.1:8000`. The browser connects to Boson for Realtime and requests microphone access. Server VAD threshold defaults to the provider's updated 0.85 and can be tuned in the UI for quieter microphones. TTS and Avatar buttons submit paid API requests. Local request limits are 10 TTS and 3 Avatar requests per hour; Realtime ephemeral-key requests are not locally rate-limited. Boson-side limits still apply. Realtime auto-disconnects after five minutes.
+- Open `http://127.0.0.1:8000`. The page embeds the live 3D view and connects to Boson for Realtime when you start a session and grant microphone access. Server VAD threshold defaults to the provider's updated 0.85 and can be tuned in the UI for quieter microphones. TTS and Avatar buttons submit paid API requests. Local request limits are 10 TTS and 3 Avatar requests per hour; Realtime ephemeral-key requests are not locally rate-limited. Boson-side limits still apply. Realtime auto-disconnects after five minutes.
 
 ## Cost and authorization
 

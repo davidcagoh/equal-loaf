@@ -30,6 +30,17 @@ RATE_LIMITS = {
     "/api/avatar": (3, 3600),
     "/api/game-goal": (30, 3600),
 }
+
+
+def _viewer_port_from_env() -> int:
+    raw_port = os.environ.get("BOSON_VIEWER_PORT", "3000")
+    try:
+        port = int(raw_port)
+    except ValueError as error:
+        raise ValueError("BOSON_VIEWER_PORT must be a valid TCP port") from error
+    if not 1 <= port <= 65_535:
+        raise ValueError("BOSON_VIEWER_PORT must be a valid TCP port")
+    return port
 VIDEO_ID = re.compile(r"^[A-Za-z0-9_-]{1,120}$")
 IMAGE_DATA_URI = re.compile(r"^data:image/(?:png|jpeg|webp);base64,([A-Za-z0-9+/]+={0,2})$")
 SSL = ssl.create_default_context(
@@ -129,6 +140,7 @@ class LocalServer(ThreadingHTTPServer):
     def __init__(self, server_address: tuple[str, int]):
         super().__init__(server_address, Handler)
         self.api_token = secrets.token_urlsafe(32)
+        self.viewer_port = _viewer_port_from_env()
         self.request_times = {path: deque() for path in RATE_LIMITS}
         self.rate_lock = threading.Lock()
 
@@ -214,6 +226,7 @@ class Handler(BaseHTTPRequestHandler):
         if path in {"/", "/index.html"}:
             html = (ROOT / "index.html").read_text(encoding="utf-8")
             html = html.replace("__LOCAL_API_TOKEN__", self.server.api_token)
+            html = html.replace("__VIEWER_PORT__", str(self.server.viewer_port))
             self.send_body(200, "text/html; charset=utf-8", html.encode("utf-8"))
             return
         if path == "/api/status":
