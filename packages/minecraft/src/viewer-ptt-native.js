@@ -285,9 +285,14 @@ export class NativeResidentAudioClient {
         if (!isRetryableActivationFailure(error)) throw error;
         activation = await this.#post('/boson-ptt/native-audio/activate', {});
       }
-      if (activation?.available !== true || !safeProviderId(activation.activationId)
-        || !Array.isArray(activation.sessions) || activation.sessions.length > MAX_NATIVE_REACTION_SESSIONS) return;
+      if (activation?.available !== true || !safeProviderId(activation.activationId)) return;
       this.nativeActivationId = activation.activationId;
+      if (!Array.isArray(activation.sessions) || activation.sessions.length > MAX_NATIVE_REACTION_SESSIONS) {
+        const activationId = this.nativeActivationId;
+        this.nativeActivationId = null;
+        await this.#post('/boson-ptt/native-audio/deactivate', { activationId }).catch(() => undefined);
+        return;
+      }
       this.nativeActivationNeedsRefresh = false;
       const seenSessionIds = new Set();
       if (activation.sessions.length === 0) this.nativeActivationNeedsRefresh = true;
@@ -393,7 +398,7 @@ export class NativeResidentAudioClient {
         return;
       }
     } catch {
-      if (connection.activeReaction?.reactionId === dispatch?.reactionId) connection.activeReaction = null;
+      if (status === 'accepted' && connection.activeReaction?.reactionId === dispatch?.reactionId) connection.activeReaction = null;
       return;
     }
     if (status !== 'accepted' || !connection.activeReaction || connection.activeReaction.reactionId !== dispatch.reactionId) return;

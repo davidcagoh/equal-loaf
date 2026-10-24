@@ -177,6 +177,7 @@ test('reaction dispatch stays session-bound, requests text-only response, and fi
       position: { x: -3, y: 0, z: 0 }, shortLivedCredential: 'bai-eph-mira', expiresAt: Math.floor(Date.now() / 1_000) + 60,
       reactionStream: '/boson-ptt/reaction/stream?residentSessionId=session_mira_0002' },
   ] };
+  let acceptedPipAckCount = 0;
   const { client, requests, micRequests } = setupClient({
     fetchImpl: async (path: string, request: any) => {
       const body = request.body ? JSON.parse(request.body) : {};
@@ -184,10 +185,15 @@ test('reaction dispatch stays session-bound, requests text-only response, and fi
       if (path === '/boson-ptt/native-audio/activate') return { ok: true, status: 200, json: async () => activation };
       if (path === '/boson-ptt/native/begin') return { ok: true, status: 200, json: async () => ({ available: true, ...residents[0], instructions: 'Prompt for Thomas' }) };
       if (path === '/boson-ptt/native/credential') return { ok: true, status: 200, json: async () => ({ available: true, clientSecret: 'bai-eph-test' }) };
-      if (path === '/boson-ptt/reaction/ack') return { ok: true, status: 200, json: async () => ({
-        accepted: body.status === 'accepted' && body.reactionId !== 'reaction-rejected',
-        status: body.reactionId === 'reaction-rejected' ? 'busy' : body.status,
-      }) };
+      if (path === '/boson-ptt/reaction/ack') {
+        if (body.reactionId === 'reaction-1' && acceptedPipAckCount++ > 0) {
+          return { ok: false, status: 409, json: async () => ({ error: 'duplicate' }) };
+        }
+        return { ok: true, status: 200, json: async () => ({
+          accepted: body.status === 'accepted' && body.reactionId !== 'reaction-rejected',
+          status: body.reactionId === 'reaction-rejected' ? 'busy' : body.status,
+        }) };
+      }
       if (path === '/boson-ptt/reaction/speech/start') return { ok: true, status: 200, json: async () => ({ accepted: true, status: 'started' }) };
       if (path === '/boson-ptt/reaction/speech/finish') return { ok: true, status: 200, json: async () => ({ accepted: true, status: 'finished' }) };
       return { ok: true, status: 200, json: async () => ({ accepted: true }) };
@@ -221,6 +227,10 @@ test('reaction dispatch stays session-bound, requests text-only response, and fi
   pipStream.event('native-reaction', { version: 1, type: 'native.reaction.dispatch', reactionId: 'reaction-1',
     eventId: 'event-1', residentId: 'pip', context: 'Anna said the garden needs water.', causalDepth: 1, expiresAt: Date.now() + 30_000 });
   await settle(); await settle();
+  pipStream.event('native-reaction', { version: 1, type: 'native.reaction.dispatch', reactionId: 'reaction-1',
+    eventId: 'event-1', residentId: 'pip', context: 'Anna said the garden needs water.', causalDepth: 1, expiresAt: Date.now() + 30_000 });
+  await settle(); await settle();
+  assert.equal(pip.activeReaction?.reactionId, 'reaction-1', 'a duplicate SSE event does not clear the active reaction');
   miraStream.event('native-reaction', { version: 1, type: 'native.reaction.dispatch', reactionId: 'reaction-2',
     eventId: 'event-2', residentId: 'mira', context: 'Thomas said the bakery is open.', causalDepth: 1, expiresAt: Date.now() + 30_000 });
   await settle(); await settle();
