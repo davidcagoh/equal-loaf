@@ -153,11 +153,20 @@ export class NativeResidentAudioClient {
   async handleRealtimeEvent(connection, event) {
     if (this.connections.get(connection.residentSessionId) !== connection || !event || typeof event.type !== 'string') return;
     if (event.type === 'session.created' || event.type === 'session.updated') {
-      if (!isNativeRealtimeSessionAck(event, connection.voice, this.enableInputTranscription)) throw new Error('session_config_mismatch');
+      if (!isNativeRealtimeSessionAck(event, connection.voice, connection.expectedInputTranscription)) throw new Error('session_config_mismatch');
       connection.ready = true;
       connection.resolveReady?.();
       connection.resolveReady = null;
       this.onStatus(`ready:${connection.speakerName}`);
+      if (connection.turn?.promptUpdatePending) {
+        this.#sendTurnSessionUpdate(connection.turn);
+        return;
+      }
+      if (connection.turn?.promptUpdateInProgress) {
+        connection.turn.promptUpdateInProgress = false;
+        if (connection.turn === this.turn && this.#isHeld(connection.turn.generation)) await this.#startCapture(connection.turn);
+        return;
+      }
       if (connection.turn && connection.turn === this.turn && this.#isHeld(connection.turn.generation)) await this.#startCapture(connection.turn);
       return;
     }
@@ -305,8 +314,7 @@ export class NativeResidentAudioClient {
           continue;
         }
         seenSessionIds.add(session.residentSessionId);
-        try { await this.#openReactionSession(session); }
-        catch {
+        void this.#openReactionSession(session).catch(() => {
           const failedConnection = this.connections.get(session.residentSessionId);
           if (failedConnection) {
             failedConnection.reactionStream?.close?.();
@@ -315,7 +323,7 @@ export class NativeResidentAudioClient {
           }
           this.nativeActivationNeedsRefresh = true;
           this.onStatus('reaction_session_unavailable');
-        }
+        });
       }
       if (this.destroyed && this.nativeActivationId) {
         const activationId = this.nativeActivationId;
@@ -341,7 +349,7 @@ export class NativeResidentAudioClient {
     const connection = {
       residentSessionId: session.residentSessionId, residentId: session.residentId,
       speakerName: session.speakerName, voice, pendingBegin: null, activationInstructions: session.instructions,
-      activationSession: true,
+      activationSession: true, expectedInputTranscription: false,
       socket, ready: false, turn: null, playback: createNativeResponsePlayback(), activeResponseId: null,
       interruptionPending: null, outputItems: new Map(), responseStates: new Map(),
       pendingByteMap: new Map(), reactionStream: null, activeReaction: null, reactionByResponse: new Map(),
@@ -454,9 +462,13 @@ export class NativeResidentAudioClient {
       pendingInputSpeechAcks: 0, inputTranscriptionTimers: new Map() };
     if (!this.#isHeld(generation)) connection.turn.released = true;
     this.turn = connection.turn;
-    if (begin.reuseSession && connection.ready) {
+    if (connection.activationSession) {
+      connection.turn.promptUpdatePending = !connection.ready;
+      if (connection.ready) this.#sendTurnSessionUpdate(connection.turn);
+      if (!this.#isHeld(generation)) { this.releaseHeldTurn(); return; }
+    } else if (begin.reuseSession && connection.ready) {
       connection.turn = this.turn;
-      connection.socket.send(JSON.stringify({ type: 'session.update', session: createSessionConfig(begin.instructions, begin.voice, this.enableInputTranscription) }));
+      this.#sendTurnSessionUpdate(connection.turn);
       if (!this.#isHeld(generation)) { this.releaseHeldTurn(); return; }
     } else if (connection.ready && this.#isHeld(generation)) {
       await this.#startCapture(this.turn);
@@ -464,6 +476,14 @@ export class NativeResidentAudioClient {
     if (connection.turn.released) {
       this.#maybeEndTurn(connection.turn);
     }
+  }
+
+  #sendTurnSessionUpdate(turn) {
+    turn.promptUpdatePending = false;
+    turn.promptUpdateInProgress = true;
+    turn.connection.expectedInputTranscription = this.enableInputTranscription;
+    turn.connection.socket.send(JSON.stringify({ type: 'session.update',
+      session: createSessionConfig(turn.instructions, turn.voice, this.enableInputTranscription) }));
   }
 
   async #createConnection(begin, generation) {
@@ -484,6 +504,7 @@ export class NativeResidentAudioClient {
     const connection = {
       residentSessionId: begin.residentSessionId, residentId: begin.residentId, speakerName: begin.speakerName, voice: begin.voice,
       pendingBegin: begin,
+      expectedInputTranscription: this.enableInputTranscription,
       socket, ready: false, turn: null, playback: createNativeResponsePlayback(), activeResponseId: null,
       interruptionPending: null, outputItems: new Map(), responseStates: new Map(),
       pendingByteMap: new Map(), reactionStream: null, activeReaction: null, reactionByResponse: new Map(),
@@ -603,7 +624,10 @@ export class NativeResidentAudioClient {
         });
         item.speechStarted = true;
         if (item.reactionId && connection.activeReaction?.reactionId === item.reactionId) connection.activeReaction.outputCount += 1;
-        if (connection.failed || item.interrupted) return;
+        if (connection.failed || item.interrupted) {
+          if (item.reactionId) await this.#finishSpeechItem(connection, item, 'interrupted');
+          return;
+        }
         item.utteranceStarted = this.mixer.startUtterance({ speakerId: connection.residentId, utteranceId });
       }
       const accepted = this.mixer.enqueue({ speakerId: connection.residentId, utteranceId, samples: decoded.samples });
@@ -688,16 +712,17 @@ export class NativeResidentAudioClient {
   }
 
   #finishSpeechItem(connection, item, playback) {
-    if (item.finishing) return;
+    if (item.finishing) return item.finishPromise ?? Promise.resolve();
     item.finishing = true;
     if (item.reactionId) {
       if (!item.speechStarted) {
         connection.outputItems.delete(item.utteranceId);
-        return Promise.resolve();
+        item.finishPromise = Promise.resolve();
+        return item.finishPromise;
       }
-      const transcript = item.transcript.trim();
+      const transcript = truncateUtf8(item.transcript.trim(), 1_000);
       const completed = playback === 'completed' && transcript.length > 0;
-      return this.#post('/boson-ptt/reaction/speech/finish', {
+      item.finishPromise = this.#post('/boson-ptt/reaction/speech/finish', {
         reactionId: item.reactionId, residentSessionId: connection.residentSessionId,
         responseId: item.responseId, itemId: item.itemId, playback: completed ? 'completed' : 'interrupted',
         ...(completed ? { transcript } : {}),
@@ -708,16 +733,18 @@ export class NativeResidentAudioClient {
           connection.reactionByResponse.delete(item.responseId);
         }
       });
+      return item.finishPromise;
     }
     const turnId = connection.turn?.turnId;
     if (!item.speechStarted || !turnId) {
       connection.outputItems.delete(item.utteranceId);
       if (connection.turn) this.#maybeEndTurn(connection.turn);
-      return Promise.resolve();
+      item.finishPromise = Promise.resolve();
+      return item.finishPromise;
     }
     const transcript = item.transcript.trim();
     const completed = playback === 'completed' && transcript.length > 0;
-    return this.#post('/boson-ptt/speech/finish', {
+    item.finishPromise = this.#post('/boson-ptt/speech/finish', {
       turnId, residentSessionId: connection.residentSessionId, responseId: item.responseId, itemId: item.itemId,
       playback: completed ? 'completed' : 'interrupted',
       ...(completed ? { transcript } : {}),
@@ -725,6 +752,7 @@ export class NativeResidentAudioClient {
       connection.outputItems.delete(item.utteranceId);
       if (connection.turn) this.#maybeEndTurn(connection.turn);
     });
+    return item.finishPromise;
   }
 
   #interruptOutput(connection) {
@@ -758,9 +786,15 @@ export class NativeResidentAudioClient {
     if (!reaction) return;
     const responsePending = reaction.responseRequested
       && (!reaction.responseId || connection.responseStates.get(reaction.responseId)?.status === null);
+    const reactionItems = [...connection.outputItems.values()].filter((item) => item.reactionId === reaction.reactionId);
+    for (const item of reactionItems) item.interrupted = true;
     this.#interruptOutput(connection);
-    for (const item of connection.outputItems.values()) this.mixer?.stopUtterance(item.utteranceId);
+    for (const item of reactionItems) this.mixer?.stopUtterance(item.utteranceId);
     connection.activeReaction = null;
+    await Promise.all(reactionItems.map(async (item) => {
+      await item.chain.catch(() => undefined);
+      await this.#finishSpeechItem(connection, item, 'interrupted');
+    }));
     if (responsePending && connection.socket.readyState === this.WebSocket.OPEN) {
       connection.interruptedReactionId = reaction.reactionId;
       await new Promise((resolve) => {
@@ -1074,6 +1108,17 @@ function distance3d(left, right) {
 }
 function appendBounded(previous, next, max) { return `${previous ?? ''}${next}`.slice(0, max); }
 function utf8Length(value) { return new TextEncoder().encode(value).length; }
+function truncateUtf8(value, maxBytes) {
+  let bytes = 0;
+  let result = '';
+  for (const character of value) {
+    const size = utf8Length(character);
+    if (bytes + size > maxBytes) break;
+    bytes += size;
+    result += character;
+  }
+  return result;
+}
 function isEditable(target) {
   return Boolean(target?.isContentEditable || ['INPUT', 'TEXTAREA', 'SELECT'].includes(target?.tagName)
     || target?.closest?.('[contenteditable=""], [contenteditable="true"], [role="textbox"]'));
