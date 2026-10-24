@@ -83,8 +83,8 @@ test('renders scripted village dialogue actors with the native villager model in
   assert.doesNotMatch(browserBundle, /new THREE\.OrbitControls/);
   assert.match(worldViewSource, /\['Anna', 'James', 'Thomas'\]\.includes\(e\.username\) \? 'villager' : e\.name/);
   assert.equal((worldViewSource.match(/name: \['Anna', 'James', 'Thomas'\]\.includes\(e\.username\) \? 'villager' : e\.name/g) ?? []).length, 2);
-  assert.equal(villagerModels.villager.textures.default, 'textures/entity/villager/type/plains');
-  assert.ok(browserBundle.includes('"default":"textures/entity/villager/type/plains"'));
+  assert.equal(villagerModels.villager.textures.default, 'textures/entity/villager/villager');
+  assert.ok(browserBundle.includes('"default":"textures/entity/villager/villager"'));
 });
 
 test('production postinstall reuses verified assets or fails closed when webpack is omitted', () => {
