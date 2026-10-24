@@ -10,6 +10,64 @@ const VALID_PROVIDER_CODES = new Set([
   'session_expired', 'response_cancel_not_active', 'input_audio_buffer_commit_empty',
 ]);
 
+export function nativeCaptureFailureReason(stage, error) {
+  const name = error && typeof error === 'object' && typeof error.name === 'string' ? error.name : '';
+  if (stage === 'microphone') {
+    if (name === 'NotAllowedError') return 'microphone_permission_denied';
+    if (name === 'SecurityError') return 'microphone_security_blocked';
+    if (name === 'NotFoundError' || name === 'DevicesNotFoundError') return 'microphone_device_missing';
+    if (name === 'NotReadableError' || name === 'AbortError') return 'microphone_device_busy';
+    return 'microphone_unavailable';
+  }
+  if (stage === 'audio_context') return 'audio_context_unavailable';
+  if (stage === 'worklet') return 'audio_worklet_unavailable';
+  return 'capture_graph_unavailable';
+}
+
+export async function acquireNativeCapture({ isCurrent, getUserMedia, resumeContext, prepareWorklet, createCapture, stopStream, disconnectCapture }) {
+  let stream;
+  let capture;
+  let stage = 'microphone';
+  try {
+    const streamPromise = getUserMedia();
+    stream = await streamPromise;
+    if (!isCurrent()) { stopStream(stream); return { capture: null, reason: 'capture_cancelled' }; }
+    stage = 'audio_context';
+    await resumeContext();
+    if (!isCurrent()) { stopStream(stream); return { capture: null, reason: 'capture_cancelled' }; }
+    stage = 'worklet';
+    await prepareWorklet();
+    if (!isCurrent()) { stopStream(stream); return { capture: null, reason: 'capture_cancelled' }; }
+    stage = 'capture_graph';
+    capture = createCapture(stream);
+    if (!isCurrent()) {
+      disconnectCapture(capture);
+      stopStream(stream);
+      return { capture: null, reason: 'capture_cancelled' };
+    }
+    return { capture, reason: null };
+  } catch (error) {
+    if (capture) disconnectCapture(capture);
+    if (stream) stopStream(stream);
+    return { capture: null, reason: nativeCaptureFailureReason(stage, error) };
+  }
+}
+
+export function createRetryableWorkletLoader(load) {
+  let pending;
+  return () => {
+    if (!pending) {
+      const attempt = Promise.resolve().then(load);
+      const retryable = attempt.catch((error) => {
+        if (pending === retryable) pending = undefined;
+        throw error;
+      });
+      pending = retryable;
+    }
+    return pending;
+  };
+}
+
 export function decodePcm16Base64Audio(value) {
   if (typeof value !== 'string' || value.length === 0 || value.length > MAX_DELTA_BASE64_CHARS) return null;
   let binary;
@@ -119,11 +177,12 @@ function bootNativePtt(root, resident) {
     responsePlayback: createNativeResponsePlayback(),
     providerTokens: null,
     timers: new Set(),
-    workletReady: null,
     ackTimer: null,
     sessionGeneration: 0,
     heartbeatTimer: null,
+    captureGeneration: 0,
   };
+  const stoppedStreams = new WeakSet();
 
   const diagnostic = (message) => {
     const list = byId('diagnostic-list');
@@ -188,10 +247,23 @@ function bootNativePtt(root, resident) {
     capture.node.port.onmessage = null;
     try { capture.node.disconnect(); } catch { /* already disconnected */ }
     try { capture.source.disconnect(); } catch { /* already disconnected */ }
-    for (const track of capture.stream.getTracks()) track.stop();
+    stopTracks(capture.stream);
   };
+  const stopTracks = (stream) => {
+    if (!stream || stoppedStreams.has(stream)) return;
+    stoppedStreams.add(stream);
+    for (const track of stream.getTracks()) { try { track.stop(); } catch { /* track already ended */ } }
+  };
+  const disconnectCapture = (capture) => {
+    if (!capture) return;
+    if (capture.node?.port) capture.node.port.onmessage = null;
+    try { capture.node?.disconnect(); } catch { /* not connected */ }
+    try { capture.source.disconnect(); } catch { /* not connected */ }
+  };
+  let loadWorklet = () => Promise.reject(new Error('Audio context is not ready'));
   const closeSession = async (message = 'Conversation ended.', reason = 'session_ended') => {
     state.sessionGeneration += 1;
+    state.captureGeneration += 1;
     state.sessionStarting = false;
     const sessionId = state.sessionId;
     state.held = false;
@@ -446,7 +518,9 @@ function bootNativePtt(root, resident) {
     status('session-state', 'Starting native Realtime session…');
     try {
       state.audioContext = new AudioContext({ sampleRate: RATE });
-      await state.audioContext.resume();
+      const audioContext = state.audioContext;
+      loadWorklet = createRetryableWorkletLoader(() => audioContext.audioWorklet.addModule('/boson-ptt-worklet.js'));
+      await audioContext.resume();
       const response = await fetch('/native/story/session/start', {
         method: 'POST', credentials: 'same-origin', cache: 'no-store', redirect: 'error',
         headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ residentId: resident.residentId }),
@@ -516,53 +590,64 @@ function bootNativePtt(root, resident) {
 
   const startCapture = async () => {
     if (!state.sessionReady || state.held || state.waitingForCommit) return;
+    const captureGeneration = ++state.captureGeneration;
+    const isCurrent = () => state.captureGeneration === captureGeneration && state.held && state.sessionReady;
     state.held = true;
     interruptOutput();
     if (!state.held || !state.sessionReady) return;
     status('turn-state', 'Microphone permission requested for this held turn…');
     refreshControls();
-    let stream;
-    try {
-      if (!navigator.mediaDevices?.getUserMedia) throw new Error('permission_unavailable');
-      stream = await navigator.mediaDevices.getUserMedia({ audio: { echoCancellation: true, noiseSuppression: true, channelCount: 1 } });
-      if (!state.held || !state.sessionReady) {
-        stream.getTracks().forEach((track) => track.stop());
-        return;
-      }
-      if (!state.workletReady) state.workletReady = state.audioContext.audioWorklet.addModule('/boson-ptt-worklet.js');
-      await state.workletReady;
-      if (!state.held || !state.sessionReady) {
-        stream.getTracks().forEach((track) => track.stop());
-        return;
-      }
-      const source = state.audioContext.createMediaStreamSource(stream);
-      const node = new AudioWorkletNode(state.audioContext, 'boson-ptt-capture', {
-        processorOptions: { targetSampleRate: RATE },
-      });
-      node.port.onmessage = (event) => {
-        const samples = event.data;
-        if (!state.held || !state.sessionReady || !(samples instanceof Float32Array) || samples.length === 0) return;
-        const audio = encodePcm16(samples);
-        if (state.socket?.readyState === WebSocket.OPEN) {
-          state.socket.send(JSON.stringify({ type: 'input_audio_buffer.append', audio }));
-          state.inputSamples += samples.length;
-          updateUsage();
+    const result = await acquireNativeCapture({
+      isCurrent,
+      getUserMedia: () => {
+        if (!navigator.mediaDevices?.getUserMedia) throw Object.assign(new Error(), { name: 'NotSupportedError' });
+        return navigator.mediaDevices.getUserMedia({ audio: { echoCancellation: true, noiseSuppression: true, channelCount: 1 } });
+      },
+      resumeContext: () => state.audioContext.resume(),
+      prepareWorklet: loadWorklet,
+      createCapture: (stream) => {
+        const source = state.audioContext.createMediaStreamSource(stream);
+        let node;
+        try {
+          node = new AudioWorkletNode(state.audioContext, 'boson-ptt-capture', {
+            processorOptions: { targetSampleRate: RATE },
+          });
+          node.port.onmessage = (event) => {
+            const samples = event.data;
+            if (!isCurrent() || !(samples instanceof Float32Array) || samples.length === 0) return;
+            const audio = encodePcm16(samples);
+            if (state.socket?.readyState === WebSocket.OPEN) {
+              state.socket.send(JSON.stringify({ type: 'input_audio_buffer.append', audio }));
+              state.inputSamples += samples.length;
+              updateUsage();
+            }
+          };
+          source.connect(node);
+          node.connect(state.audioContext.destination);
+          return { stream, source, node };
+        } catch (error) {
+          disconnectCapture({ source, node });
+          throw error;
         }
-      };
-      source.connect(node);
-      node.connect(state.audioContext.destination);
-      state.capture = { stream, source, node };
-      status('turn-state', 'Listening · release P to send this turn.', 'good');
-    } catch {
-      stream?.getTracks().forEach((track) => track.stop());
+      },
+      stopStream: stopTracks,
+      disconnectCapture,
+    });
+    if (!isCurrent()) return;
+    if (!result.capture) {
       state.held = false;
       state.holdSource = null;
-      status('turn-state', 'Microphone unavailable · check this page’s permission and input device.', 'warn');
+      status('turn-state', `Microphone unavailable · ${result.reason.replaceAll('_', ' ')}.`, 'warn');
+      refreshControls();
+      return;
     }
+    state.capture = result.capture;
+    status('turn-state', 'Listening · release P to send this turn.', 'good');
     refreshControls();
   };
   const releaseCapture = () => {
     if (!state.held) return;
+    state.captureGeneration += 1;
     state.held = false;
     state.holdSource = null;
     const hadCapture = Boolean(state.capture);
