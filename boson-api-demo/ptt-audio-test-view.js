@@ -23,14 +23,25 @@ export function deriveAudioBenchOutcome(snapshot) {
     const ttsLimit = limits.ttsRequests;
     const ttsCapped = Number.isSafeInteger(ttsRequests) && Number.isSafeInteger(ttsLimit)
       && ttsLimit > 0 && ttsRequests >= ttsLimit;
+    const priorTurn = usage.lastTurn;
+    const priorIntent = safeEnum(priorTurn?.playerIntent, /^[a-z_]{1,40}$/);
+    const priorTopic = safeEnum(priorTurn?.topic, /^[a-z_]{1,40}$/);
+    const priorLineId = safeEnum(priorTurn?.lineId, /^[A-Za-z0-9:_-]{1,128}$/);
+    const priorSummary = priorTurn?.status === 'authored_response_selected' && priorIntent && priorTopic && priorLineId
+      ? `Previous selection: ${priorIntent} · ${priorTopic} · ${priorLineId}. `
+      : priorTurn?.status === 'authored_fallback'
+        ? 'Previous turn used the fixed local greeting; semantic selection was not confirmed. '
+        : '';
     return {
       kind: 'ready',
-      title: 'Ready for one short test',
-      message: 'Enable audio once, then hold P and release when you’re done.',
+      title: turnsUsed === 0 ? 'Ready for two short tests' : 'One short test remains',
+      message: priorSummary + (turnsUsed === 0
+        ? 'Enable audio once, then make two different requests with a separate hold and release for each.'
+        : 'One turn is complete. Make a different request, then hold P and release when you’re done.'),
       playback: '',
       note: ttsCapped
-        ? 'One Realtime turn is available. The provider TTS allowance is used; reply audio may use the browser fallback.'
-        : 'One Realtime turn is available.',
+        ? `${turnLimit - turnsUsed} Realtime turn${turnLimit - turnsUsed === 1 ? '' : 's'} available. The provider TTS allowance is used; reply audio may use the browser fallback.`
+        : `${turnLimit - turnsUsed} Realtime turn${turnLimit - turnsUsed === 1 ? '' : 's'} available.`,
     };
   }
 
@@ -39,24 +50,39 @@ export function deriveAudioBenchOutcome(snapshot) {
     return {
       kind: 'pending',
       title: 'Test turn is resolving',
-      message: 'The one-turn allowance is used. Waiting for the final result; no new turn can be started.',
+      message: 'The two-turn allowance is used. Waiting for the final result; no new turn can be started.',
       playback: '',
       note: 'This allowance will not reset automatically.',
     };
   }
 
-  let message = 'The one-turn allowance was used, but completion status was not recorded.';
+  let message = 'The two-turn allowance was used, but completion status was not recorded.';
   if (turn?.status === 'authored_response_selected') {
     const intent = safeEnum(turn.playerIntent, /^[a-z_]{1,40}$/);
     const topic = safeEnum(turn.topic, /^[a-z_]{1,40}$/);
-    message = intent && topic
-      ? `Realtime selected an authored reply (${intent} · ${topic}).`
+    const lineId = safeEnum(turn.lineId, /^[A-Za-z0-9:_-]{1,128}$/);
+    message = intent && topic && lineId
+      ? `Realtime selected ${intent} · ${topic} · ${lineId}.`
       : 'Realtime selected an authored reply.';
   } else if (turn?.status === 'authored_fallback') {
     message = 'Realtime completed without selecting an accepted authored reply. The fixture used its fixed greeting; semantic intent and topic were not confirmed.';
   }
 
   const tts = usage.tts ?? {};
+  const turnResults = Array.isArray(usage.turnResults) && usage.turnResults.length <= turnLimit
+    ? usage.turnResults.map((result) => {
+      const turnNumber = Number.isSafeInteger(result?.turnNumber) && result.turnNumber >= 1 && result.turnNumber <= turnLimit
+        ? result.turnNumber : null;
+      const intent = safeEnum(result?.playerIntent, /^[a-z_]{1,40}$/);
+      const topic = safeEnum(result?.topic, /^[a-z_]{1,40}$/);
+      const lineId = safeEnum(result?.lineId, /^[A-Za-z0-9:_-]{1,128}$/);
+      if (!turnNumber || !lineId) return null;
+      return result.status === 'authored_response_selected' && intent && topic
+        ? `Turn ${turnNumber}: ${intent} · ${topic} · ${lineId}`
+        : result.status === 'authored_fallback' ? `Turn ${turnNumber}: authored fallback · ${lineId}` : null;
+    }).filter(Boolean)
+    : [];
+  if (turnResults.length > 0) message = `Completed results — ${turnResults.join('; ')}.`;
   const succeeded = Number.isSafeInteger(tts.succeededRequests) ? tts.succeededRequests : 0;
   const failed = Number.isSafeInteger(tts.failedRequests) ? tts.failedRequests : 0;
   const unknown = Number.isSafeInteger(tts.outcomeUnknownRequests) ? tts.outcomeUnknownRequests : 0;
@@ -74,6 +100,6 @@ export function deriveAudioBenchOutcome(snapshot) {
     title: 'Test complete',
     message,
     playback,
-    note: 'The one-turn allowance is used and will not reset automatically.',
+    note: 'The two-turn allowance is used and will not reset automatically.',
   };
 }

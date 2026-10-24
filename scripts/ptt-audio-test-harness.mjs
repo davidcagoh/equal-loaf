@@ -11,33 +11,45 @@ import { createHiggsTtsHandler, RESIDENT_VOICES, TTS_CHARACTER_USD } from '../pa
 
 const PROJECT_ROOT = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 const PAGE_PATH = join(PROJECT_ROOT, 'boson-api-demo', 'ptt-audio-test.html');
-const MAX_TEST_TURNS = 1;
+const MAX_TEST_TURNS = 2;
 const MAX_HOLD_MS = 30_000;
-const MAX_TTS_REQUESTS = 1;
-const MAX_TTS_CHARACTERS = 120;
+const MAX_TTS_REQUESTS = 2;
+const MAX_TTS_CHARACTERS = 96;
 let mockRealtimeHarnessActive = false;
 
 export const FIXED_RESIDENT = Object.freeze({
   id: 'mira',
   name: 'Anna',
   role: 'garden helper',
-  goal: 'welcome visitors and share one public garden fact',
+  goal: 'welcome visitors or help with ordinary garden work',
   locationId: 'isolated-audio-test',
-  topics: Object.freeze(['general']),
-  facts: Object.freeze(['The garden is growing well today.']),
-  responseOptions: Object.freeze([Object.freeze({
-    lineId: 'mira-greeting',
-    summary: 'A warm authored greeting',
-    allowedIntents: Object.freeze(['greet']),
-    topics: Object.freeze(['general']),
-  })]),
+  topics: Object.freeze(['general', 'garden']),
+  facts: Object.freeze(['The garden is growing well today.', 'The east beds need watering.']),
+  responseOptions: Object.freeze([
+    Object.freeze({
+      lineId: 'mira-greeting',
+      summary: 'A warm authored greeting',
+      allowedIntents: Object.freeze(['greet']),
+      topics: Object.freeze(['general']),
+    }),
+    Object.freeze({
+      lineId: 'mira-garden-help',
+      summary: 'A simple public request for garden help',
+      allowedIntents: Object.freeze(['ask_for_help']),
+      topics: Object.freeze(['garden']),
+    }),
+  ]),
   relationship: 'unfamiliar',
 });
 
 export const FIXED_AUTHORED_LINE = Object.freeze({
   lineId: 'mira-greeting',
-  text: 'Hello. The garden is growing well today. Thanks for stopping by.',
+  text: 'Hello. The garden is growing well today.',
 });
+const AUTHORED_LINES = new Map([
+  ['mira-greeting', FIXED_AUTHORED_LINE],
+  ['mira-garden-help', Object.freeze({ lineId: 'mira-garden-help', text: 'Please water the east beds.' })],
+]);
 
 function json(response, status, value, headers = {}) {
   response.writeHead(status, {
@@ -176,6 +188,7 @@ export async function startPttAudioHarness({ port = 0, host = '127.0.0.1', provi
   let stopped = false;
   let realtimeTurnsUsed = 0;
   let lastTurn = null;
+  const turnResults = [];
   let mockFetchUsers = 0;
   let mockOriginalFetch;
   let mockFetch;
@@ -234,13 +247,17 @@ export async function startPttAudioHarness({ port = 0, host = '127.0.0.1', provi
       status: selected ? 'authored_response_selected' : 'authored_fallback',
       ...(selected ? { playerIntent: selected.playerIntent, topic: selected.topic, lineId: selected.lineId } : { lineId: FIXED_AUTHORED_LINE.lineId }),
     };
+    if (turnResults.length < MAX_TEST_TURNS) {
+      turnResults.push({ turnNumber: realtimeTurnsUsed, ...lastTurn });
+    }
+    const authoredLine = AUTHORED_LINES.get(lastTurn.lineId) ?? FIXED_AUTHORED_LINE;
     broadcast({
       type: 'village.dialogue',
       eventId: `audio-test-${turnId}`,
-      lineId: FIXED_AUTHORED_LINE.lineId,
+      lineId: authoredLine.lineId,
       speakerId: FIXED_RESIDENT.id,
       speakerName: FIXED_RESIDENT.name,
-      line: FIXED_AUTHORED_LINE.text,
+      line: authoredLine.text,
       position: { x: 0, y: 0, z: 0 },
       timestamp: Date.now(),
     });
@@ -317,6 +334,7 @@ export async function startPttAudioHarness({ port = 0, host = '127.0.0.1', provi
         usage: {
           realtimeTurns: realtimeTurnsUsed,
           lastTurn,
+          turnResults: turnResults.slice(0, MAX_TEST_TURNS),
           tts: {
             requests: ttsUsage.requests,
             characters: ttsUsage.characters,
@@ -350,7 +368,7 @@ export async function startPttAudioHarness({ port = 0, host = '127.0.0.1', provi
 
     if (pathname === '/boson-ptt/begin' && request.method === 'POST') {
       if (realtimeTurnsUsed >= MAX_TEST_TURNS) {
-        json(response, 429, { available: false, error: 'This isolated test allows one Realtime turn.' });
+        json(response, 429, { available: false, error: 'This isolated test allows two Realtime turns.' });
         return;
       }
       realtimeTurnsUsed += 1;
@@ -393,10 +411,12 @@ export async function startPttAudioHarness({ port = 0, host = '127.0.0.1', provi
     ttsServer = createHiggsTtsHandler({
       resolveUtterance: (eventId, speakerId) => {
         const event = dialogueByKey.get(`${speakerId}:${eventId}`);
-        if (!event || event.lineId !== FIXED_AUTHORED_LINE.lineId || speakerId !== FIXED_RESIDENT.id) return null;
+        if (!event || speakerId !== FIXED_RESIDENT.id) return null;
+        const line = AUTHORED_LINES.get(event.lineId);
+        if (!line || event.lineId !== line.lineId) return null;
         return {
-          lineId: FIXED_AUTHORED_LINE.lineId,
-          text: FIXED_AUTHORED_LINE.text,
+          lineId: line.lineId,
+          text: line.text,
           voice: RESIDENT_VOICES[FIXED_RESIDENT.id],
         };
       },

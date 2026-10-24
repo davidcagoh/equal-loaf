@@ -107,7 +107,7 @@
     </header>
     <section class="intro" aria-labelledby="page-title">
       <div><p class="eyebrow">Push-to-talk integration check</p><h1 id="page-title">Voice loop, before the world.</h1></div>
-      <p class="dek">One real held turn to Boson Realtime, followed by one authored resident reply through Boson TTS. No Minecraft world is started. No speech is sent until you hold the talk button.</p>
+      <p class="dek">Two deliberate held turns to Boson Realtime, each followed by one authored resident reply through Boson TTS. No Minecraft world is started. No speech is sent until you hold the talk button.</p>
     </section>
 
     <div class="workbench">
@@ -115,11 +115,11 @@
         <p class="eyebrow">Fixed public resident fixture</p>
         <div class="fixture">
           <div class="avatar" aria-hidden="true">A</div>
-          <div><h2 id="fixture-title">Anna</h2><p class="role">Garden helper · one public topic</p></div>
+          <div><h2 id="fixture-title">Anna</h2><p class="role">Garden helper · greeting and garden help</p></div>
         </div>
-        <p class="public-note"><strong>Known fact</strong><span>The garden is growing well today.</span></p>
-        <blockquote class="reply-line">“Hello. The garden is growing well today. Thanks for stopping by.”</blockquote>
-        <p class="instructions">Enable audio once, then hold P or the talk button. Release when you’re done speaking.</p>
+        <p class="public-note"><strong>Public facts</strong><span>The garden is growing well today; the east beds need watering.</span></p>
+        <blockquote class="reply-line">“Hello. The garden is growing well today.”<br><br>“Please water the east beds.”</blockquote>
+        <p class="instructions">Enable audio once. Make two different deliberate requests, holding P or the talk button for each. Release after each turn.</p>
         <div id="run-controls" hidden>
           <button id="enable-audio" class="enable-audio" type="button">Enable audio</button>
           <span id="audio-enable-note" class="audio-enable-note" role="status" aria-live="polite">One tap enables reply playback.</span>
@@ -147,17 +147,17 @@
             <div class="signal-row"><span class="signal-dot" id="dot-tts" aria-hidden="true"></span><span class="signal-name">TTS playback</span><span class="signal-value" id="tts-state">Waiting for authored reply</span></div>
           </div>
           <div class="usage" aria-label="Bounded test usage">
-            <div class="usage-item"><span class="micro-label">Realtime turns</span><strong id="turn-usage">0 / 1</strong></div>
+            <div class="usage-item"><span class="micro-label">Realtime turns</span><strong id="turn-usage">0 / 2</strong></div>
             <div class="usage-item"><span class="micro-label">Hold limit</span><strong>30 seconds</strong></div>
-            <div class="usage-item"><span class="micro-label">TTS requests</span><strong id="tts-usage">0 / 1</strong></div>
-            <div class="usage-item"><span class="micro-label">TTS text cap</span><strong>120 characters</strong></div>
+            <div class="usage-item"><span class="micro-label">TTS requests</span><strong id="tts-usage">0 / 2</strong></div>
+            <div class="usage-item"><span class="micro-label">Total TTS text cap</span><strong>96 characters</strong></div>
           </div>
           <p id="usage-foot" class="usage-foot">Realtime monetary usage is not reported here. TTS estimate uses the adapter’s configured per-character rate; provider billing may differ.</p>
           <p id="harness-error" class="usage-foot error" role="status" aria-live="polite"></p>
         </details>
       </section>
     </div>
-    <footer class="foot"><span>No world state · one speaker · one turn</span><span>Hold P or the button · mic opens only while held</span></footer>
+    <footer class="foot"><span>No world state · one speaker · two turns</span><span>Hold P or the button · mic opens only while held</span></footer>
   </main>
 
   <script type="module" nonce="__CSP_NONCE__">
@@ -363,7 +363,7 @@
           runControls.hidden = true;
           outcomeSummary.dataset.state = 'warn';
           text('outcome-title', 'Test status unavailable');
-          text('outcome-message', 'The one-turn allowance could not be checked, so test controls stay hidden.');
+          text('outcome-message', 'The two-turn allowance could not be checked, so test controls stay hidden.');
           text('outcome-playback', 'Reconnect to the local lab to see its current result.');
           text('outcome-note', 'No provider attempt was made from this status check.');
         }

@@ -18,14 +18,14 @@ test('isolated audio harness serves production modules behind local security and
   assert.match(csp, /wss:\/\/api\.boson\.ai/);
   assert.match(page, /Fixed public resident fixture/);
   assert.match(page, /30 seconds/);
-  assert.match(page, /one real held turn/i);
-  assert.match(page, /120 characters/);
+  assert.match(page, /two deliberate held turns/i);
+  assert.match(page, /96 characters/);
   assert.match(page, /No Minecraft world/);
   assert.doesNotMatch(page, /<iframe\b/i);
   assert.match(page, /id="run-controls" hidden/);
   assert.match(page, /id="enable-audio"[^>]*>Enable audio</);
   assert.match(page, /<details id="diagnostics"/);
-  assert.match(page, /hold P or the talk button/i);
+  assert.match(page, /P or the talk button/i);
   assert.match(page, /deriveAudioBenchOutcome/);
   assert.match(page, /ptt-response-rejected/);
   assert.doesNotMatch(page, /Reply audio enabled for this tab/);
@@ -55,16 +55,17 @@ test('isolated audio harness serves production modules behind local security and
   assert.equal(statusResponse.status, 200);
   const status = await statusResponse.json();
   assert.deepEqual(status.fixture, { speakerId: 'mira', speakerName: 'Anna', lineId: 'mira-greeting' });
-  assert.equal(status.limits.realtimeTurns, 1);
+  assert.equal(status.limits.realtimeTurns, 2);
   assert.equal(status.limits.maxHoldMs, 30_000);
-  assert.equal(status.limits.ttsRequests, 1);
-  assert.equal(status.limits.ttsCharacters, 120);
+  assert.equal(status.limits.ttsRequests, 2);
+  assert.equal(status.limits.ttsCharacters, 96);
   assert.equal(status.usage.realtimeTurns, 0);
   assert.equal(status.usage.tts.requests, 0);
   assert.equal(status.usage.tts.actualProviderUsage, null);
-  assert.deepEqual(FIXED_RESIDENT.facts, ['The garden is growing well today.']);
+  assert.deepEqual(FIXED_RESIDENT.facts, ['The garden is growing well today.', 'The east beds need watering.']);
   assert.ok(FIXED_AUTHORED_LINE.text.length <= status.limits.ttsCharacters);
-  assert.deepEqual(FIXED_RESIDENT.responseOptions.map(({ lineId }) => lineId), ['mira-greeting']);
+  assert.equal(status.limits.estimatedTtsUsdMax, 0.00144);
+  assert.deepEqual(FIXED_RESIDENT.responseOptions.map(({ lineId }) => lineId), ['mira-greeting', 'mira-garden-help']);
 
   const localOrigin = new URL(harness.url).origin;
   const firstBegin = await fetch(new URL('/boson-ptt/begin', harness.url), {
@@ -76,9 +77,15 @@ test('isolated audio harness serves production modules behind local security and
     method: 'POST',
     headers: { Origin: localOrigin, 'Sec-Fetch-Site': 'same-origin' },
   });
-  assert.equal(secondBegin.status, 429, 'the one-turn cap rejects every later attempt');
+  assert.equal(secondBegin.status, 503, 'the second allowed turn is blocked because the provider is disabled');
+  const thirdBegin = await fetch(new URL('/boson-ptt/begin', harness.url), {
+    method: 'POST',
+    headers: { Origin: localOrigin, 'Sec-Fetch-Site': 'same-origin' },
+  });
+  assert.equal(thirdBegin.status, 429, 'the two-turn cap rejects later attempts');
+  assert.deepEqual(await thirdBegin.json(), { available: false, error: 'This isolated test allows two Realtime turns.' });
   const afterBegin = await fetch(new URL('/harness/status', harness.url)).then((response) => response.json());
-  assert.equal(afterBegin.usage.realtimeTurns, 1);
+  assert.equal(afterBegin.usage.realtimeTurns, 2);
 
   const blockedTts = await fetch(new URL('/boson-tts', harness.url), {
     method: 'POST',
@@ -90,9 +97,10 @@ test('isolated audio harness serves production modules behind local security and
   assert.equal(afterBlockedTts.usage.tts.requests, 0);
 });
 
-test('mocked provider flow begins, completes, resolves the authored event, and caps TTS without network access', async (context) => {
+test('mocked provider flow discriminates two public intents and caps cumulative TTS without network access', async (context) => {
   let realtimeCalls = 0;
   let ttsCalls = 0;
+  const ttsInputs = [];
   const originalFetch = globalThis.fetch;
   const harness = await startPttAudioHarness({
     providerEnabled: true,
@@ -104,7 +112,8 @@ test('mocked provider flow begins, completes, resolves the authored event, and c
     ttsFetcher: async (_url, options) => {
       ttsCalls += 1;
       const body = JSON.parse(options.body);
-      assert.equal(body.input, FIXED_AUTHORED_LINE.text);
+      ttsInputs.push(body.input);
+      assert.ok(['Hello. The garden is growing well today.', 'Please water the east beds.'].includes(body.input));
       assert.equal(body.voice, 'chloe');
       return new Response('stubbed provider failure', { status: 503 });
     },
@@ -121,7 +130,7 @@ test('mocked provider flow begins, completes, resolves the authored event, and c
   const begin = await fetch(new URL('/boson-ptt/begin', harness.url), { method: 'POST', headers });
   assert.equal(begin.status, 200);
   const turn = await begin.json();
-  assert.deepEqual(turn.allowedLineIds, ['mira-greeting']);
+  assert.deepEqual(turn.allowedLineIds, ['mira-greeting', 'mira-garden-help']);
   assert.equal(turn.maxHoldMs, 30_000);
   assert.equal(realtimeCalls, 1);
 
@@ -142,10 +151,38 @@ test('mocked provider flow begins, completes, resolves the authored event, and c
   });
   assert.equal(tts.status, 502);
   assert.equal(ttsCalls, 1);
+  await new Promise((resolve) => setTimeout(resolve, 1_050));
+  const secondBegin = await fetch(new URL('/boson-ptt/begin', harness.url), { method: 'POST', headers });
+  assert.equal(secondBegin.status, 200);
+  const secondTurn = await secondBegin.json();
+  const secondComplete = await fetch(new URL('/boson-ptt/complete', harness.url), {
+    method: 'POST', headers: { ...headers, 'Content-Type': 'application/json' },
+    body: JSON.stringify({ turnId: secondTurn.turnId, response: { playerIntent: 'ask_for_help', topic: 'garden', lineId: 'mira-garden-help' } }),
+  });
+  assert.equal(secondComplete.status, 200);
+  assert.equal((await secondComplete.json()).status, 'accepted');
+  const secondEventText = new TextDecoder().decode((await reader.read()).value);
+  assert.match(secondEventText, /mira-garden-help/);
+  const secondTts = await fetch(new URL('/boson-tts', harness.url), {
+    method: 'POST', headers: { ...headers, 'Content-Type': 'application/json' },
+    body: JSON.stringify({ eventId: `audio-test-${secondTurn.turnId}`, speakerId: 'mira' }),
+  });
+  assert.equal(secondTts.status, 502);
+  assert.equal(ttsCalls, 2);
+  assert.deepEqual(ttsInputs, ['Hello. The garden is growing well today.', 'Please water the east beds.']);
+  const thirdBegin = await fetch(new URL('/boson-ptt/begin', harness.url), { method: 'POST', headers });
+  assert.equal(thirdBegin.status, 429, 'the two-turn cap rejects a third request');
   const usage = await fetch(new URL('/harness/status', harness.url)).then((response) => response.json());
-  assert.equal(usage.usage.realtimeTurns, 1);
-  assert.equal(usage.usage.tts.requests, 1);
-  assert.equal(usage.usage.tts.characters, FIXED_AUTHORED_LINE.text.length);
+  assert.equal(usage.usage.realtimeTurns, 2);
+  assert.equal(usage.usage.tts.requests, 2);
+  assert.equal(usage.usage.tts.characters, 67);
+  assert.deepEqual(usage.usage.lastTurn, {
+    status: 'authored_response_selected', playerIntent: 'ask_for_help', topic: 'garden', lineId: 'mira-garden-help',
+  });
+  assert.deepEqual(usage.usage.turnResults, [
+    { turnNumber: 1, status: 'authored_response_selected', playerIntent: 'greet', topic: 'general', lineId: 'mira-greeting' },
+    { turnNumber: 2, status: 'authored_response_selected', playerIntent: 'ask_for_help', topic: 'garden', lineId: 'mira-garden-help' },
+  ]);
   await reader.cancel();
   await harness.close();
   assert.equal(globalThis.fetch, originalFetch, 'closing the harness restores the process fetch transport');
