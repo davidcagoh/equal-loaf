@@ -29,6 +29,18 @@ function bridgeError(status) {
 }
 
 function pttAckDescriptor(command, status) {
+  if (command?.type?.startsWith('ptt.reaction.') && typeof command.reactionId === 'string') {
+    return {
+      version: 1,
+      type: command.type === 'ptt.reaction.ack' ? 'ptt.reaction.ack' : 'ptt.reaction.speech.ack',
+      reactionId: command.reactionId,
+      eventId: command.eventId,
+      residentId: command.residentId,
+      ...(command.responseId ? { responseId: command.responseId } : {}),
+      ...(command.itemId ? { itemId: command.itemId } : {}),
+      status,
+    };
+  }
   if (!command || typeof command.turnId !== 'string') return bridgeError(status);
   if (command.type === 'ptt.begin' || command.type === 'ptt.native.begin' || command.type === 'ptt.complete' || command.type === 'ptt.cancel') {
     const phase = command.type === 'ptt.begin' || command.type === 'ptt.native.begin' ? 'begin' : command.type === 'ptt.cancel' ? 'cancel' : 'complete';
@@ -36,6 +48,7 @@ function pttAckDescriptor(command, status) {
   }
   const ackType = command.type === 'ptt.session.bind' ? 'ptt.session.ack'
     : command.type === 'ptt.speech.start' || command.type === 'ptt.speech.finish' ? 'ptt.speech.ack'
+      : command.type === 'ptt.player.speech.finish' ? 'ptt.player.speech.ack'
       : command.type === 'ptt.native.end' ? 'ptt.native.ack' : null;
   if (!ackType) return bridgeError(status);
   return {
@@ -45,15 +58,15 @@ function pttAckDescriptor(command, status) {
   };
 }
 
-function ackKey(type, phase, turnId, responseId, itemId) {
-  return `${type}:${phase ?? ''}:${turnId}:${responseId ?? ''}:${itemId ?? ''}`;
+function ackKey(type, phase, turnId, responseId, itemId, reactionId) {
+  return `${type}:${phase ?? ''}:${turnId ?? ''}:${responseId ?? ''}:${itemId ?? ''}:${reactionId ?? ''}`;
 }
 
 function deliverAck(event) {
-  if (!event || !['ptt.ack', 'ptt.session.ack', 'ptt.speech.ack', 'ptt.native.ack'].includes(event.type)
-    || typeof event.turnId !== 'string') return false;
+  if (!event || !['ptt.ack', 'ptt.session.ack', 'ptt.speech.ack', 'ptt.player.speech.ack', 'ptt.native.ack', 'ptt.reaction.ack', 'ptt.reaction.speech.ack'].includes(event.type)
+    || (typeof event.turnId !== 'string' && typeof event.reactionId !== 'string')) return false;
   const phase = event.type === 'ptt.ack' ? event.phase : undefined;
-  const key = ackKey(event.type, phase, event.turnId, event.responseId, event.itemId);
+  const key = ackKey(event.type, phase, event.turnId, event.responseId, event.itemId, event.reactionId);
   const pending = pendingAcks.get(key);
   if (!pending) return true;
   clearTimeout(pending.timer);
@@ -75,7 +88,7 @@ function handleIpcLine(socket, line) {
   }
 
   const errorAck = pttAckDescriptor(command, 'unavailable');
-  const key = ackKey(errorAck.type, errorAck.phase, command.turnId, errorAck.responseId, errorAck.itemId);
+  const key = ackKey(errorAck.type, errorAck.phase, command.turnId, errorAck.responseId, errorAck.itemId, errorAck.reactionId);
   if (pendingAcks.has(key)) {
     socket.end(`${JSON.stringify(pttAckDescriptor(command, 'duplicate'))}\n`);
     return;
@@ -160,6 +173,20 @@ async function relayResidentPositions(event) {
   }
 }
 
+async function relayNativeReaction(event) {
+  try {
+    const response = await fetch(`http://127.0.0.1:${viewerPort}/boson-ptt/reaction/dispatch`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify(event),
+      signal: AbortSignal.timeout(3_000),
+    });
+    if (!response.ok) process.stderr.write(`Native reaction dispatch rejected (${response.status}).\n`);
+  } catch {
+    process.stderr.write('Native reaction dispatch failed.\n');
+  }
+}
+
 async function stop(signal = 'SIGTERM') {
   if (stopping) return;
   stopping = true;
@@ -210,6 +237,10 @@ for await (const line of lines) {
   if (deliverAck(event)) continue;
   if (event?.type === 'village.residents') {
     void relayResidentPositions(event);
+    continue;
+  }
+  if (event?.type === 'village.native.reaction') {
+    void relayNativeReaction(event);
     continue;
   }
   if (event?.type !== 'village.dialogue') {

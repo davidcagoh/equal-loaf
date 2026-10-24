@@ -81,9 +81,44 @@ export interface VillageNativePttEndCommand {
   at: number;
 }
 
+export interface VillageNativeReactionAckCommand {
+  version: 1;
+  type: 'ptt.reaction.ack';
+  reactionId: string;
+  residentId: string;
+  eventId: string;
+  status: 'accepted' | 'busy' | 'unavailable';
+  at: number;
+}
+
+export interface VillageNativeReactionSpeechStartCommand {
+  version: 1;
+  type: 'ptt.reaction.speech.start';
+  reactionId: string;
+  residentId: string;
+  eventId: string;
+  responseId: string;
+  itemId: string;
+  at: number;
+}
+
+export interface VillageNativeReactionSpeechFinishCommand {
+  version: 1;
+  type: 'ptt.reaction.speech.finish';
+  reactionId: string;
+  residentId: string;
+  eventId: string;
+  responseId: string;
+  itemId: string;
+  playback: 'completed' | 'interrupted';
+  transcript?: string;
+  at: number;
+}
+
 export type VillagePttCommand = VillagePttBeginCommand | VillageNativePttBeginCommand | VillagePttCompleteCommand | VillagePttCancelCommand
   | VillagePttBindResidentSessionCommand | VillageResidentSpeechStartCommand
-  | VillageResidentSpeechFinishCommand | VillagePlayerSpeechFinishCommand | VillageNativePttEndCommand;
+  | VillageResidentSpeechFinishCommand | VillagePlayerSpeechFinishCommand | VillageNativePttEndCommand
+  | VillageNativeReactionAckCommand | VillageNativeReactionSpeechStartCommand | VillageNativeReactionSpeechFinishCommand;
 
 export interface VillagePttBeginContext {
   id: string;
@@ -114,15 +149,20 @@ export type VillagePttAck =
 const TURN_ID_PATTERN = /^[A-Za-z0-9_-]{8,128}$/;
 const SESSION_ID_PATTERN = /^[A-Za-z0-9_-]{8,128}$/;
 const PROVIDER_ID_PATTERN = /^[A-Za-z0-9_.:-]{1,160}$/;
+const REACTION_ID_PATTERN = /^[A-Za-z0-9_-]{8,128}$/;
+const SAFE_ID_PATTERN = /^[A-Za-z0-9_-]{1,128}$/;
 const MAX_NATIVE_TRANSCRIPT_BYTES = 1_000;
 export const MAX_PTT_COMMAND_BYTES = 8_192;
 
 export function isVillagePttCommand(value: unknown): value is VillagePttCommand {
   if (!value || typeof value !== 'object' || Array.isArray(value)) return false;
   const command = value as Record<string, unknown>;
-  if (command.version !== 1 || !TURN_ID_PATTERN.test(String(command.turnId ?? ''))
-    || typeof command.at !== 'number' || !Number.isSafeInteger(command.at)
+  if (command.version !== 1 || typeof command.at !== 'number' || !Number.isSafeInteger(command.at)
     || Math.abs(Date.now() - command.at) > 30_000) return false;
+
+  if (command.type === 'ptt.reaction.ack' || command.type === 'ptt.reaction.speech.start' || command.type === 'ptt.reaction.speech.finish') {
+    // Reaction messages have their own engine-issued correlation ID; they never borrow a PTT turn ID.
+  } else if (!TURN_ID_PATTERN.test(String(command.turnId ?? ''))) return false;
 
   if (command.type === 'ptt.begin' || command.type === 'ptt.native.begin' || command.type === 'ptt.cancel') {
     return Object.keys(command).sort().join(',') === 'at,turnId,type,version';
@@ -166,6 +206,36 @@ export function isVillagePttCommand(value: unknown): value is VillagePttCommand 
       && typeof command.transcript === 'string' && command.transcript.trim().length > 0
       && Buffer.byteLength(command.transcript, 'utf8') <= MAX_NATIVE_TRANSCRIPT_BYTES
       && !/[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f]/.test(command.transcript);
+  }
+  if (command.type === 'ptt.reaction.ack') {
+    return Object.keys(command).sort().join(',') === 'at,eventId,reactionId,residentId,status,type,version'
+      && REACTION_ID_PATTERN.test(String(command.reactionId ?? ''))
+      && SAFE_ID_PATTERN.test(String(command.eventId ?? ''))
+      && SAFE_ID_PATTERN.test(String(command.residentId ?? ''))
+      && ['accepted', 'busy', 'unavailable'].includes(String(command.status));
+  }
+  if (command.type === 'ptt.reaction.speech.start') {
+    return Object.keys(command).sort().join(',') === 'at,eventId,itemId,reactionId,residentId,responseId,type,version'
+      && REACTION_ID_PATTERN.test(String(command.reactionId ?? ''))
+      && SAFE_ID_PATTERN.test(String(command.eventId ?? ''))
+      && SAFE_ID_PATTERN.test(String(command.residentId ?? ''))
+      && PROVIDER_ID_PATTERN.test(String(command.responseId ?? ''))
+      && PROVIDER_ID_PATTERN.test(String(command.itemId ?? ''));
+  }
+  if (command.type === 'ptt.reaction.speech.finish') {
+    const hasTranscript = Object.hasOwn(command, 'transcript');
+    return Object.keys(command).sort().join(',') === (hasTranscript
+      ? 'at,eventId,itemId,playback,reactionId,residentId,responseId,transcript,type,version'
+      : 'at,eventId,itemId,playback,reactionId,residentId,responseId,type,version')
+      && REACTION_ID_PATTERN.test(String(command.reactionId ?? ''))
+      && SAFE_ID_PATTERN.test(String(command.eventId ?? ''))
+      && SAFE_ID_PATTERN.test(String(command.residentId ?? ''))
+      && PROVIDER_ID_PATTERN.test(String(command.responseId ?? ''))
+      && PROVIDER_ID_PATTERN.test(String(command.itemId ?? ''))
+      && (command.playback === 'interrupted' ? !hasTranscript : command.playback === 'completed' && hasTranscript
+        && typeof command.transcript === 'string' && command.transcript.trim().length > 0
+        && Buffer.byteLength(command.transcript, 'utf8') <= MAX_NATIVE_TRANSCRIPT_BYTES
+        && !/[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f]/.test(command.transcript));
   }
   return false;
 }

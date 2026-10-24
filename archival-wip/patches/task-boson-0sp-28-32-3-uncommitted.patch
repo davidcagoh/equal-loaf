@@ -1,0 +1,1299 @@
+diff --git a/packages/minecraft/src/viewer-ptt-server.test.ts b/packages/minecraft/src/viewer-ptt-server.test.ts
+index 423427d..b405ad2 100644
+--- a/packages/minecraft/src/viewer-ptt-server.test.ts
++++ b/packages/minecraft/src/viewer-ptt-server.test.ts
+@@ -180,3 +180,257 @@ test('HTTP begin and complete carry a safe choice over UDS and resolve private s
+     globalThis.fetch = originalFetch;
+   }
+ });
++
++test('native audio activation selects only authoritative nearby residents and correlates a reaction to one session', async () => {
++  const originalKey = process.env.BOSON_API_KEY;
++  const originalPttEnvFile = process.env.BOSON_PTT_ENV_FILE;
++  const originalSocketPath = process.env.BOSON_VILLAGE_IPC_SOCKET;
++  const originalFetch = globalThis.fetch;
++  const directory = await mkdtemp(join(tmpdir(), 'boson-native-reaction-test-'));
++  const socketPath = join(directory, 'village.sock');
++  delete process.env.BOSON_PTT_ENV_FILE;
++  process.env.BOSON_API_KEY = '[REDACTED SYNTHETIC TEST FIXTURE]';
++  process.env.BOSON_VILLAGE_IPC_SOCKET = socketPath;
++  const commands: Array<Record<string, unknown>> = [];
++  let credentials = 0;
++  let credentialDelayMs = 0;
++  globalThis.fetch = (async (input: RequestInfo | URL, init?: RequestInit) => {
++    if (String(input).startsWith('https://api.boson.ai/')) {
++      credentials += 1;
++      if (credentialDelayMs) await new Promise((resolve) => setTimeout(resolve, credentialDelayMs));
++      return new Response(JSON.stringify({ value: `bai-eph-test-${credentials}`, expires_at: Math.floor(Date.now() / 1_000) + 60 }), { status: 200 });
++    }
++    return originalFetch(input, init);
++  }) as typeof fetch;
++  const ipcServer = createIpcServer((socket) => {
++    let buffer = '';
++    socket.setEncoding('utf8');
++    socket.on('data', (chunk) => {
++      buffer += chunk;
++      const newline = buffer.indexOf('\n');
++      if (newline < 0) return;
++      const command = JSON.parse(buffer.slice(0, newline)) as Record<string, unknown>;
++      commands.push(command);
++      const response = command.type === 'ptt.reaction.ack'
++        ? { version: 1, type: 'ptt.reaction.ack', ...(command.reactionId ? { reactionId: command.reactionId } : {}),
++          eventId: command.eventId, residentId: command.residentId, status: command.status }
++        : { version: 1, type: 'ptt.reaction.speech.ack', reactionId: command.reactionId, eventId: command.eventId,
++          residentId: command.residentId, responseId: command.responseId, itemId: command.itemId,
++          status: command.type === 'ptt.reaction.speech.start' ? 'started'
++            : command.playback === 'interrupted' ? 'interrupted' : 'finished' };
++      socket.end(`${JSON.stringify(response)}\n`);
++    });
++  });
++  const httpServer = createHttpServer();
++  let ptt: ReturnType<typeof createPttServer> | undefined;
++  let abortA: AbortController | undefined;
++  let abortB: AbortController | undefined;
++  try {
++    await new Promise<void>((resolve, reject) => { ipcServer.once('error', reject); ipcServer.listen(socketPath, resolve); });
++    await new Promise<void>((resolve, reject) => { httpServer.once('error', reject); httpServer.listen(0, '127.0.0.1', resolve); });
++    const address = httpServer.address();
++    assert.ok(address && typeof address !== 'string');
++    const port = address.port;
++    ptt = createPttServer(port);
++    httpServer.on('request', (request, response) => { if (!ptt?.handleRequest(request, response)) response.writeHead(404).end(); });
++    const origin = `http://127.0.0.1:${port}`;
++    const snapshot = {
++      type: 'village.residents', timestamp: Date.now(), playerPosition: { x: 0, y: 64, z: 0 },
++      residents: [
++        { residentId: 'mira', name: 'Anna', position: { x: 3, y: 64, z: 0 } },
++        { residentId: 'pip', name: 'Thomas', position: { x: 8, y: 64, z: 0 } },
++        { residentId: 'tobin', name: 'James', position: { x: 40, y: 64, z: 0 } },
++      ],
++    };
++    const state = await originalFetch(`${origin}/boson-ptt/native-audio/state`, {
++      method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(snapshot),
++    });
++    assert.equal(state.status, 202);
++    credentialDelayMs = 50;
++    const lostReplyAbort = new AbortController();
++    const lostReply = originalFetch(`${origin}/boson-ptt/native-audio/activate`, {
++      method: 'POST', headers: { Origin: origin, 'Sec-Fetch-Site': 'same-origin', 'Content-Type': 'application/json' },
++      body: '{}', signal: lostReplyAbort.signal,
++    });
++    await new Promise((resolve) => setTimeout(resolve, 5));
++    lostReplyAbort.abort();
++    await assert.rejects(lostReply);
++    const activated = await originalFetch(`${origin}/boson-ptt/native-audio/activate`, {
++      method: 'POST', headers: { Origin: origin, 'Sec-Fetch-Site': 'same-origin', 'Content-Type': 'application/json' }, body: '{}',
++    });
++    credentialDelayMs = 0;
++    const activation = await activated.json() as { available: boolean; activationId: string; sessions: Array<Record<string, unknown>> };
++    assert.equal(activated.status, 200);
++    assert.equal(activation.available, true);
++    assert.equal(activation.sessions.length, 2);
++    assert.deepEqual(activation.sessions.map(({ residentId }) => residentId), ['mira', 'pip']);
++    for (const session of activation.sessions) {
++      assert.equal(typeof session.residentSessionId, 'string');
++      assert.equal(typeof session.shortLivedCredential, 'string');
++      assert.equal(typeof session.instructions, 'string');
++      assert.equal(typeof session.voice, 'string');
++      assert.deepEqual(session.position, snapshot.residents.find(({ residentId }) => residentId === session.residentId)?.position);
++    }
++    assert.equal(credentials, 2);
++    const retriedActivationResponse = await originalFetch(`${origin}/boson-ptt/native-audio/activate`, {
++      method: 'POST', headers: { Origin: origin, 'Sec-Fetch-Site': 'same-origin', 'Content-Type': 'application/json' }, body: '{}',
++    });
++    const retriedActivation = await retriedActivationResponse.json() as typeof activation;
++    assert.equal(retriedActivationResponse.status, 200);
++    assert.equal(retriedActivation.activationId, activation.activationId);
++    assert.deepEqual(retriedActivation.sessions, activation.sessions);
++    assert.equal(credentials, 2, 'activation retry replays the same bounded credentials instead of minting more sessions');
++
++    const mira = activation.sessions[0];
++    const pip = activation.sessions[1];
++    abortA = new AbortController(); abortB = new AbortController();
++    const [miraStream, pipStream] = await Promise.all([mira, pip].map((session, index) => originalFetch(
++      `${origin}/boson-ptt/reaction/stream?residentSessionId=${session.residentSessionId}`,
++      { headers: { Origin: origin, 'Sec-Fetch-Site': 'same-origin' }, signal: index === 0 ? abortA.signal : abortB.signal },
++    )));
++    assert.equal(miraStream.status, 200);
++    assert.equal(pipStream.status, 200);
++    const miraReader = miraStream.body!.getReader();
++    const pipReader = pipStream.body!.getReader();
++    await miraReader.read(); await pipReader.read();
++    const candidate = {
++      version: 1, type: 'village.native.reaction', eventId: 'event-12345678', residentId: 'mira',
++      origin: 'routine', causalDepth: 0, context: 'You finished tending the west garden.',
++      createdAt: Date.now(), expiresAt: Date.now() + 25_000,
++    };
++    const dispatched = await originalFetch(`${origin}/boson-ptt/reaction/dispatch`, {
++      method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(candidate),
++    });
++    assert.equal(dispatched.status, 202);
++    const dispatch = await dispatched.json() as { reactionId: string };
++    assert.ok(dispatch.reactionId);
++    const miraChunk = await miraReader.read();
++    assert.match(new TextDecoder().decode(miraChunk.value), new RegExp(dispatch.reactionId));
++    const noPipChunk = await Promise.race([
++      pipReader.read().then(() => 'received'),
++      new Promise<string>((resolve) => setTimeout(() => resolve('quiet'), 25)),
++    ]);
++    assert.equal(noPipChunk, 'quiet');
++    abortB.abort();
++    abortB = new AbortController();
++    const pipReconnect = await originalFetch(`${origin}/boson-ptt/reaction/stream?residentSessionId=${pip.residentSessionId}`,
++      { headers: { Origin: origin, 'Sec-Fetch-Site': 'same-origin' }, signal: abortB.signal });
++    const pipReconnectReader = pipReconnect.body!.getReader();
++    await pipReconnectReader.read();
++    const sameEventForPip = { ...candidate, residentId: 'pip', context: 'You have just finished baking bread.' };
++    const pipDispatchResponse = await originalFetch(`${origin}/boson-ptt/reaction/dispatch`, {
++      method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(sameEventForPip),
++    });
++    assert.equal(pipDispatchResponse.status, 202, 'the same event may target a different resident');
++    const pipDispatch = await pipDispatchResponse.json() as { reactionId: string };
++    assert.match(new TextDecoder().decode((await pipReconnectReader.read()).value), new RegExp(pipDispatch.reactionId));
++    const pipBusy = await originalFetch(`${origin}/boson-ptt/reaction/ack`, {
++      method: 'POST', headers: { Origin: origin, 'Sec-Fetch-Site': 'same-origin', 'Content-Type': 'application/json' },
++      body: JSON.stringify({ reactionId: pipDispatch.reactionId, residentSessionId: pip.residentSessionId, status: 'busy' }),
++    });
++    assert.equal(pipBusy.status, 200);
++
++    const forged = await originalFetch(`${origin}/boson-ptt/reaction/ack`, {
++      method: 'POST', headers: { Origin: origin, 'Sec-Fetch-Site': 'same-origin', 'Content-Type': 'application/json' },
++      body: JSON.stringify({ reactionId: dispatch.reactionId, residentSessionId: pip.residentSessionId, status: 'accepted' }),
++    });
++    assert.equal(forged.status, 410);
++    const accepted = await originalFetch(`${origin}/boson-ptt/reaction/ack`, {
++      method: 'POST', headers: { Origin: origin, 'Sec-Fetch-Site': 'same-origin', 'Content-Type': 'application/json' },
++      body: JSON.stringify({ reactionId: dispatch.reactionId, residentSessionId: mira.residentSessionId, status: 'accepted' }),
++    });
++    assert.equal(accepted.status, 200);
++    const started = await originalFetch(`${origin}/boson-ptt/reaction/speech/start`, {
++      method: 'POST', headers: { Origin: origin, 'Sec-Fetch-Site': 'same-origin', 'Content-Type': 'application/json' },
++      body: JSON.stringify({ reactionId: dispatch.reactionId, residentSessionId: mira.residentSessionId, responseId: 'resp_1', itemId: 'item_1' }),
++    });
++    assert.equal(started.status, 200);
++    const finished = await originalFetch(`${origin}/boson-ptt/reaction/speech/finish`, {
++      method: 'POST', headers: { Origin: origin, 'Sec-Fetch-Site': 'same-origin', 'Content-Type': 'application/json' },
++      body: JSON.stringify({ reactionId: dispatch.reactionId, residentSessionId: mira.residentSessionId, responseId: 'resp_1', itemId: 'item_1', playback: 'completed', transcript: '[REDACTED SYNTHETIC TEST TRANSCRIPT]' }),
++    });
++    assert.equal(finished.status, 200);
++
++    const interruptedCandidate = { ...candidate, eventId: 'event-12345680', createdAt: Date.now(), expiresAt: Date.now() + 10_000 };
++    const interruptedDispatchResponse = await originalFetch(`${origin}/boson-ptt/reaction/dispatch`, {
++      method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(interruptedCandidate),
++    });
++    assert.equal(interruptedDispatchResponse.status, 202);
++    const interruptedDispatch = await interruptedDispatchResponse.json() as { reactionId: string };
++    await miraReader.read();
++    const interruptedAck = await originalFetch(`${origin}/boson-ptt/reaction/ack`, {
++      method: 'POST', headers: { Origin: origin, 'Sec-Fetch-Site': 'same-origin', 'Content-Type': 'application/json' },
++      body: JSON.stringify({ reactionId: interruptedDispatch.reactionId, residentSessionId: mira.residentSessionId, status: 'accepted' }),
++    });
++    assert.equal(interruptedAck.status, 200);
++    const interruptedStart = await originalFetch(`${origin}/boson-ptt/reaction/speech/start`, {
++      method: 'POST', headers: { Origin: origin, 'Sec-Fetch-Site': 'same-origin', 'Content-Type': 'application/json' },
++      body: JSON.stringify({ reactionId: interruptedDispatch.reactionId, residentSessionId: mira.residentSessionId, responseId: 'resp_2', itemId: 'item_2' }),
++    });
++    assert.equal(interruptedStart.status, 200);
++    const interruptedFinish = await originalFetch(`${origin}/boson-ptt/reaction/speech/finish`, {
++      method: 'POST', headers: { Origin: origin, 'Sec-Fetch-Site': 'same-origin', 'Content-Type': 'application/json' },
++      body: JSON.stringify({ reactionId: interruptedDispatch.reactionId, residentSessionId: mira.residentSessionId, responseId: 'resp_2', itemId: 'item_2', playback: 'interrupted' }),
++    });
++    assert.equal(interruptedFinish.status, 200);
++    assert.deepEqual(await interruptedFinish.json(), { accepted: true, status: 'interrupted' });
++    const duplicateInterruptedFinish = await originalFetch(`${origin}/boson-ptt/reaction/speech/finish`, {
++      method: 'POST', headers: { Origin: origin, 'Sec-Fetch-Site': 'same-origin', 'Content-Type': 'application/json' },
++      body: JSON.stringify({ reactionId: interruptedDispatch.reactionId, residentSessionId: mira.residentSessionId, responseId: 'resp_2', itemId: 'item_2', playback: 'interrupted' }),
++    });
++    assert.equal(duplicateInterruptedFinish.status, 410);
++
++    assert.equal(commands.filter(({ type }) => type === 'ptt.reaction.ack').some((command) => command.residentId === 'pip' && command.status === 'busy'), true);
++    assert.equal(commands.filter(({ type }) => type === 'ptt.reaction.ack').some((command) => command.residentId === 'mira' && command.eventId === candidate.eventId && command.status === 'accepted'), true);
++    assert.equal(commands.filter(({ type }) => type === 'ptt.reaction.ack').some((command) => command.residentId === 'mira' && command.eventId === interruptedCandidate.eventId && command.status === 'accepted'), true);
++    assert.equal(commands.some((command) => command.type === 'ptt.reaction.speech.finish' && command.playback === 'completed'), true);
++    assert.equal(commands.some((command) => command.type === 'ptt.reaction.speech.finish' && command.playback === 'interrupted'), true);
++
++    const duplicate = await originalFetch(`${origin}/boson-ptt/reaction/dispatch`, {
++      method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(candidate),
++    });
++    assert.equal(duplicate.status, 409);
++    const duplicateRelease = commands.find((command) => command.type === 'ptt.reaction.ack'
++      && command.eventId === candidate.eventId && command.residentId === 'mira' && command.status === 'unavailable');
++    assert.ok(duplicateRelease);
++    assert.equal(Object.hasOwn(duplicateRelease, 'reactionId'), false);
++
++    const expiringCandidate = { ...candidate, eventId: 'event-12345679', createdAt: Date.now(), expiresAt: Date.now() + 120 };
++    const expiringDispatchResponse = await originalFetch(`${origin}/boson-ptt/reaction/dispatch`, {
++      method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(expiringCandidate),
++    });
++    assert.equal(expiringDispatchResponse.status, 202);
++    const expiringDispatch = await expiringDispatchResponse.json() as { reactionId: string };
++    await miraReader.read();
++    await new Promise((resolve) => setTimeout(resolve, 180));
++    const expiredRelease = commands.find((command) => command.type === 'ptt.reaction.ack' && command.reactionId === expiringDispatch.reactionId);
++    assert.ok(expiredRelease);
++    assert.equal(expiredRelease.status, 'unavailable');
++
++    const deactivated = await originalFetch(`${origin}/boson-ptt/native-audio/deactivate`, {
++      method: 'POST', headers: { Origin: origin, 'Sec-Fetch-Site': 'same-origin', 'Content-Type': 'application/json' },
++      body: JSON.stringify({ activationId: activation.activationId }),
++    });
++    assert.equal(deactivated.status, 200);
++    await new Promise((resolve) => setTimeout(resolve, 1_550));
++    const staleState = await originalFetch(`${origin}/boson-ptt/native-audio/state`, {
++      method: 'POST', headers: { 'content-type': 'application/json' },
++      body: JSON.stringify({ ...snapshot, timestamp: Date.now() - 2_000 }),
++    });
++    assert.equal(staleState.status, 409);
++    const staleActivation = await originalFetch(`${origin}/boson-ptt/native-audio/activate`, {
++      method: 'POST', headers: { Origin: origin, 'Sec-Fetch-Site': 'same-origin', 'Content-Type': 'application/json' }, body: '{}',
++    });
++    assert.equal(staleActivation.status, 409);
++  } finally {
++    abortA?.abort(); abortB?.abort();
++    ptt?.close();
++    await new Promise<void>((resolve) => httpServer.close(() => resolve()));
++    await new Promise<void>((resolve) => ipcServer.close(() => resolve()));
++    await rm(directory, { recursive: true, force: true });
++    if (originalKey === undefined) delete process.env.BOSON_API_KEY; else process.env.BOSON_API_KEY = originalKey;
++    if (originalPttEnvFile === undefined) delete process.env.BOSON_PTT_ENV_FILE; else process.env.BOSON_PTT_ENV_FILE = originalPttEnvFile;
++    if (originalSocketPath === undefined) delete process.env.BOSON_VILLAGE_IPC_SOCKET; else process.env.BOSON_VILLAGE_IPC_SOCKET = originalSocketPath;
++    globalThis.fetch = originalFetch;
++  }
++});
+diff --git a/packages/minecraft/src/viewer-ptt-server.ts b/packages/minecraft/src/viewer-ptt-server.ts
+index 3c6f097..0ac3d4f 100644
+--- a/packages/minecraft/src/viewer-ptt-server.ts
++++ b/packages/minecraft/src/viewer-ptt-server.ts
+@@ -4,6 +4,8 @@ import type { IncomingMessage, ServerResponse } from 'node:http';
+ import { PLAYER_INTENTS, VILLAGE_TOPICS } from './village-vocabulary.js';
+ import { buildNativeResidentInstructions } from './native-resident-context.ts';
+ import { RESIDENT_VOICES } from './audio/higgs-tts.js';
++import { RESIDENT_DISPLAY_NAMES, villageProfiles } from './village-profiles.ts';
++import { isVillageNativeReactionEvent, isVillageResidentPositionsEvent, type VillageNativeReactionEvent, type VillageResidentPositionsEvent } from './village-event.ts';
+ 
+ const REALTIME_CLIENT_SECRETS_URL = 'https://api.boson.ai/v1/realtime/client_secrets';
+ const REALTIME_SECRET_TTL_SECONDS = 300;
+@@ -18,6 +20,10 @@ const MAX_NATIVE_SESSION_IDS = 8;
+ const MAX_NATIVE_HEARD_SPEECH = 3;
+ const MAX_NATIVE_HEARD_TEXT_BYTES = 1_000;
+ const MAX_NATIVE_TRANSCRIPT_BYTES = 1_000;
++const MAX_NATIVE_AUDIO_SESSIONS = 4;
++const NATIVE_AUDIO_NEARBY_RADIUS = 24;
++const NATIVE_AUDIO_STATE_MAX_AGE_MS = 1_500;
++const NATIVE_REACTION_TTL_MS = 30_000;
+ const ALLOWED_INTENTS: ReadonlySet<string> = new Set(PLAYER_INTENTS);
+ const ALLOWED_TOPICS: ReadonlySet<string> = new Set(VILLAGE_TOPICS);
+ 
+@@ -62,6 +68,24 @@ interface ActiveTurn {
+ interface ResidentSessionBinding {
+   id: string;
+   residentId: string;
++  activationId?: string;
++}
++
++interface NativeAudioActivation {
++  id: string;
++  sessionIds: Set<string>;
++  reply?: Record<string, unknown>;
++  replyExpiresAtMs?: number;
++}
++
++interface ActiveNativeReaction extends VillageNativeReactionEvent {
++  reactionId: string;
++  residentSessionId: string;
++  expiresAt: number;
++  acknowledged?: 'accepted';
++  responseId?: string;
++  itemId?: string;
++  timeout: ReturnType<typeof setTimeout>;
+ }
+ 
+ interface NativeBeginRequest {
+@@ -336,12 +360,107 @@ export function createPttServer(port: number): PttServer {
+   const activeTurns = new Map<string, ActiveTurn>();
+   const residentSessionByResident = new Map<string, ResidentSessionBinding>();
+   const residentSessionById = new Map<string, ResidentSessionBinding>();
++  const reactionClients = new Map<string, ServerResponse>();
++  const activeReactions = new Map<string, ActiveNativeReaction>();
++  const seenReactionEvents = new Map<string, number>();
++  let residentSnapshot: VillageResidentPositionsEvent | undefined;
++  let nativeAudioActivation: NativeAudioActivation | undefined;
++  let nativeAudioActivationInFlight = false;
++  let resolveNativeAudioActivation: ((activation: NativeAudioActivation | undefined) => void) | undefined;
++  let nativeAudioActivationInFlightPromise: Promise<NativeAudioActivation | undefined> | undefined;
+   let turnsUsed = 0;
+   let lastBeginAt = 0;
+   let beginInFlight = false;
+   let closed = false;
+   const viewerOrigins = new Set([`http://127.0.0.1:${port}`, `http://localhost:${port}`]);
+ 
++  const closeReactionStream = (residentSessionId: string, eventName?: string): void => {
++    const stream = reactionClients.get(residentSessionId);
++    if (!stream) return;
++    reactionClients.delete(residentSessionId);
++    if (eventName && !stream.writableEnded) {
++      stream.write(`event: ${eventName}\ndata: {"type":"native.reaction.session.end"}\n\n`);
++    }
++    if (!stream.writableEnded) stream.end();
++  };
++
++  const removeReaction = (reactionId: string): ActiveNativeReaction | undefined => {
++    const reaction = activeReactions.get(reactionId);
++    if (reaction) {
++      clearTimeout(reaction.timeout);
++      activeReactions.delete(reactionId);
++    }
++    return reaction;
++  };
++
++  const reactionAck = async (reaction: Pick<ActiveNativeReaction, 'reactionId' | 'eventId' | 'residentId'>,
++    status: 'accepted' | 'busy' | 'unavailable'): Promise<Record<string, unknown>> => requestVillageIpc({
++    version: 1, type: 'ptt.reaction.ack', reactionId: reaction.reactionId,
++    eventId: reaction.eventId, residentId: reaction.residentId, status, at: Date.now(),
++  });
++
++  const releaseUndispatchedReaction = async (event: VillageNativeReactionEvent): Promise<void> => {
++    await requestVillageIpc({ version: 1, type: 'ptt.reaction.ack', eventId: event.eventId,
++      residentId: event.residentId, status: 'unavailable', at: Date.now() }).catch(() => undefined);
++  };
++
++  const nativeReactionEventKey = (eventId: string, residentId: string): string => JSON.stringify([eventId, residentId]);
++
++  const expireReaction = async (reactionId: string): Promise<void> => {
++    const reaction = activeReactions.get(reactionId);
++    if (!reaction) return;
++    removeReaction(reactionId);
++    if (reaction.responseId && reaction.itemId) {
++      await requestVillageIpc({ version: 1, type: 'ptt.reaction.speech.finish', reactionId: reaction.reactionId,
++        eventId: reaction.eventId, residentId: reaction.residentId, responseId: reaction.responseId,
++        itemId: reaction.itemId, playback: 'interrupted', at: Date.now() }).catch(() => undefined);
++    } else {
++      await reactionAck(reaction, 'unavailable').catch(() => undefined);
++    }
++  };
++
++  const retireNativeSession = async (binding: ResidentSessionBinding): Promise<void> => {
++    closeReactionStream(binding.id, 'native-reaction-session-end');
++    if (residentSessionById.get(binding.id) === binding) residentSessionById.delete(binding.id);
++    if (residentSessionByResident.get(binding.residentId) === binding) residentSessionByResident.delete(binding.residentId);
++    nativeAudioActivation?.sessionIds.delete(binding.id);
++    for (const reaction of activeReactions.values()) {
++      if (reaction.residentSessionId === binding.id) await expireReaction(reaction.reactionId);
++    }
++  };
++
++  const reconcileNativeSessions = async (snapshot: VillageResidentPositionsEvent): Promise<void> => {
++    const now = Date.now();
++    for (const sessionId of nativeAudioActivation?.sessionIds ?? []) {
++      const binding = residentSessionById.get(sessionId);
++      if (!binding) continue;
++      const resident = snapshot.residents.find(({ residentId }) => residentId === binding.residentId);
++      const distance = resident ? Math.hypot(resident.position.x - snapshot.playerPosition.x,
++        resident.position.y - snapshot.playerPosition.y, resident.position.z - snapshot.playerPosition.z) : Infinity;
++      if (distance > NATIVE_AUDIO_NEARBY_RADIUS || now - snapshot.timestamp > NATIVE_AUDIO_STATE_MAX_AGE_MS) {
++        await retireNativeSession(binding);
++      }
++    }
++    if (nativeAudioActivation && nativeAudioActivation.sessionIds.size === 0) nativeAudioActivation = undefined;
++  };
++
++  const snapshotFresh = (): boolean => Boolean(residentSnapshot
++    && Date.now() - residentSnapshot.timestamp <= NATIVE_AUDIO_STATE_MAX_AGE_MS
++    && residentSnapshot.timestamp <= Date.now() + 500);
++
++  const closeInactiveSessions = setInterval(() => {
++    if (nativeAudioActivation && !snapshotFresh()) {
++      for (const sessionId of [...nativeAudioActivation.sessionIds]) {
++        const binding = residentSessionById.get(sessionId);
++        if (binding) void retireNativeSession(binding);
++      }
++      if (!nativeAudioActivation.sessionIds.size) nativeAudioActivation = undefined;
++    }
++    const now = Date.now();
++    for (const [eventKey, expiresAt] of seenReactionEvents) if (expiresAt <= now) seenReactionEvents.delete(eventKey);
++  }, 500);
++  closeInactiveSessions.unref();
++
+   const removeTurn = (turnId: string): ActiveTurn | undefined => {
+     const turn = activeTurns.get(turnId);
+     if (turn) {
+@@ -573,6 +692,350 @@ export function createPttServer(port: number): PttServer {
+     }
+   };
+ 
++  const updateNativeAudioState = async (request: IncomingMessage, response: ServerResponse): Promise<void> => {
++    let body: unknown;
++    try { body = await readSmallJson(request, 8_192); } catch {
++      respond(response, 400, { accepted: false, error: 'Invalid village audio state.' });
++      return;
++    }
++    if (!isVillageResidentPositionsEvent(body)) {
++      respond(response, 400, { accepted: false, error: 'Invalid village audio state.' });
++      return;
++    }
++    const now = Date.now();
++    if (body.timestamp > now + 500 || now - body.timestamp > NATIVE_AUDIO_STATE_MAX_AGE_MS) {
++      respond(response, 409, { accepted: false, status: 'stale_state' });
++      return;
++    }
++    if (residentSnapshot && body.timestamp < residentSnapshot.timestamp) {
++      respond(response, 409, { accepted: false, status: 'out_of_order_state' });
++      return;
++    }
++    residentSnapshot = body;
++    await reconcileNativeSessions(body);
++    respond(response, 202, { accepted: true });
++  };
++
++  const nativeAudioActivate = async (request: IncomingMessage, response: ServerResponse): Promise<void> => {
++    if (!apiKey || !process.env.BOSON_VILLAGE_IPC_SOCKET || closed) {
++      respond(response, 503, { available: false, error: 'Village native audio is unavailable.' });
++      return;
++    }
++    let body: unknown;
++    try { body = await readSmallJson(request, 128); } catch {
++      respond(response, 400, { available: false, error: 'Invalid native audio activation.' });
++      return;
++    }
++    if (!body || typeof body !== 'object' || Array.isArray(body) || !objectHasExactKeys(body as Record<string, unknown>, [])) {
++      respond(response, 400, { available: false, error: 'Invalid native audio activation.' });
++      return;
++    }
++    if (nativeAudioActivation?.reply && (nativeAudioActivation.replyExpiresAtMs ?? 0) > Date.now()) {
++      respond(response, 200, nativeAudioActivation.reply);
++      return;
++    }
++    if (nativeAudioActivation && (nativeAudioActivation.replyExpiresAtMs ?? 0) <= Date.now()
++      && ![...nativeAudioActivation.sessionIds].some((sessionId) => reactionClients.has(sessionId))) {
++      const expiredActivation = nativeAudioActivation;
++      for (const sessionId of [...expiredActivation.sessionIds]) {
++        const binding = residentSessionById.get(sessionId);
++        if (binding) await retireNativeSession(binding);
++      }
++      if (nativeAudioActivation === expiredActivation) nativeAudioActivation = undefined;
++    }
++    if (nativeAudioActivation) {
++      respond(response, 409, { available: false, error: 'Native audio is already active.' });
++      return;
++    }
++    if (nativeAudioActivationInFlightPromise) {
++      const pendingActivation = nativeAudioActivationInFlightPromise;
++      const activation = await pendingActivation;
++      if (activation?.reply) respond(response, 200, activation.reply);
++      else respond(response, 503, { available: false, error: 'Nearby resident sessions could not be started.' });
++      return;
++    }
++    if (!snapshotFresh()) {
++      respond(response, 409, { available: false, error: 'Nearby resident state is unavailable; try again shortly.' });
++      return;
++    }
++    nativeAudioActivationInFlight = true;
++    nativeAudioActivationInFlightPromise = new Promise((resolve) => { resolveNativeAudioActivation = resolve; });
++    try {
++    const snapshot = residentSnapshot!;
++    const candidates = snapshot.residents.map((resident) => ({
++      resident,
++      profile: villageProfiles.find(({ id }) => id === resident.residentId),
++      voice: RESIDENT_VOICES[resident.residentId as keyof typeof RESIDENT_VOICES],
++      distance: Math.hypot(resident.position.x - snapshot.playerPosition.x,
++        resident.position.y - snapshot.playerPosition.y, resident.position.z - snapshot.playerPosition.z),
++    })).filter(({ profile, voice, distance }) => profile && voice && distance <= NATIVE_AUDIO_NEARBY_RADIUS)
++      .sort((a, b) => a.distance - b.distance || a.resident.residentId.localeCompare(b.resident.residentId))
++      .slice(0, MAX_NATIVE_AUDIO_SESSIONS);
++    if (!candidates.length) {
++      respond(response, 409, { available: false, error: 'No configured resident is nearby.' });
++      return;
++    }
++
++    const activation: NativeAudioActivation = { id: randomUUID(), sessionIds: new Set() };
++    const sessions: Array<Record<string, unknown>> = [];
++    for (const candidate of candidates) {
++      let credential: { clientSecret: string; expiresAt: number };
++      try { credential = await createSecret(); } catch { continue; }
++      const existing = residentSessionByResident.get(candidate.resident.residentId);
++      const binding = existing ?? { id: randomUUID(), residentId: candidate.resident.residentId };
++      binding.activationId = activation.id;
++      residentSessionByResident.set(binding.residentId, binding);
++      residentSessionById.set(binding.id, binding);
++      activation.sessionIds.add(binding.id);
++      const profile = candidate.profile!;
++      sessions.push({
++        residentSessionId: binding.id,
++        residentId: binding.residentId,
++        speakerName: candidate.resident.name || RESIDENT_DISPLAY_NAMES[profile.id as keyof typeof RESIDENT_DISPLAY_NAMES] || profile.username,
++        voice: candidate.voice,
++        instructions: buildNativeResidentInstructions({
++          id: profile.id,
++          name: candidate.resident.name || profile.username,
++          role: profile.role,
++          goal: profile.goal,
++          locationId: 'nearby',
++          topics: [], facts: [], responseOptions: [], relationship: 'unfamiliar',
++        }),
++        position: { ...candidate.resident.position },
++        shortLivedCredential: credential.clientSecret,
++        expiresAt: credential.expiresAt,
++        reactionStream: `/boson-ptt/reaction/stream?residentSessionId=${encodeURIComponent(binding.id)}`,
++      });
++    }
++    if (!sessions.length) {
++      respond(response, 503, { available: false, error: 'Nearby resident sessions could not be started.' });
++      return;
++    }
++    activation.reply = { available: true, activationId: activation.id, sessions };
++    activation.replyExpiresAtMs = Math.min(...sessions.map(({ expiresAt }) => Number(expiresAt) * 1_000));
++    nativeAudioActivation = activation;
++    respond(response, 200, activation.reply);
++    } catch {
++      for (const sessionId of activation.sessionIds) {
++        const binding = residentSessionById.get(sessionId);
++        if (binding?.activationId === activation.id) {
++          residentSessionById.delete(sessionId);
++          if (residentSessionByResident.get(binding.residentId) === binding) residentSessionByResident.delete(binding.residentId);
++        }
++      }
++      respond(response, 503, { available: false, error: 'Nearby resident sessions could not be started.' });
++    } finally {
++      nativeAudioActivationInFlight = false;
++      resolveNativeAudioActivation?.(nativeAudioActivation);
++      resolveNativeAudioActivation = undefined;
++      nativeAudioActivationInFlightPromise = undefined;
++    }
++  };
++
++  const nativeAudioDeactivate = async (request: IncomingMessage, response: ServerResponse): Promise<void> => {
++    let body: unknown;
++    try { body = await readSmallJson(request, 256); } catch {
++      respond(response, 400, { accepted: false, error: 'Invalid native audio deactivation.' });
++      return;
++    }
++    if (!body || typeof body !== 'object' || Array.isArray(body)
++      || !objectHasExactKeys(body as Record<string, unknown>, ['activationId'])
++      || !safeString((body as Record<string, unknown>).activationId, 128)) {
++      respond(response, 400, { accepted: false, error: 'Invalid native audio deactivation.' });
++      return;
++    }
++    if (!nativeAudioActivation || nativeAudioActivation.id !== (body as Record<string, unknown>).activationId) {
++      respond(response, 410, { accepted: false, error: 'Native audio activation expired.' });
++      return;
++    }
++    const activation = nativeAudioActivation;
++    nativeAudioActivation = undefined;
++    for (const sessionId of [...activation.sessionIds]) {
++      const binding = residentSessionById.get(sessionId);
++      if (binding) await retireNativeSession(binding);
++    }
++    respond(response, 200, { accepted: true });
++  };
++
++  const openNativeReactionStream = (request: IncomingMessage, response: ServerResponse): void => {
++    const url = new URL(request.url ?? '/', `http://127.0.0.1:${port}`);
++    const entries = [...url.searchParams.entries()];
++    const residentSessionId = url.searchParams.get('residentSessionId');
++    const binding = residentSessionId ? residentSessionById.get(residentSessionId) : undefined;
++    if (entries.length !== 1 || entries[0]?.[0] !== 'residentSessionId' || !binding
++      || !nativeAudioActivation || binding.activationId !== nativeAudioActivation.id) {
++      respond(response, 410, { available: false, error: 'Resident voice session expired.' });
++      return;
++    }
++    closeReactionStream(binding.id);
++    response.writeHead(200, { 'Content-Type': 'text/event-stream', 'Cache-Control': 'no-cache, no-store', Connection: 'keep-alive' });
++    response.write(': connected\n\n');
++    reactionClients.set(binding.id, response);
++    response.once('close', () => {
++      if (reactionClients.get(binding.id) !== response) return;
++      reactionClients.delete(binding.id);
++      for (const reaction of activeReactions.values()) {
++        if (reaction.residentSessionId === binding.id) void expireReaction(reaction.reactionId);
++      }
++    });
++  };
++
++  const publishNativeReaction = async (request: IncomingMessage, response: ServerResponse): Promise<void> => {
++    let body: unknown;
++    try { body = await readSmallJson(request, 2_048); } catch {
++      respond(response, 400, { accepted: false, error: 'Invalid native reaction event.' });
++      return;
++    }
++    if (!isVillageNativeReactionEvent(body)) {
++      respond(response, 400, { accepted: false, error: 'Invalid native reaction event.' });
++      return;
++    }
++    const event = body;
++    const eventKey = nativeReactionEventKey(event.eventId, event.residentId);
++    if (event.expiresAt <= Date.now() || event.causalDepth >= 2 || seenReactionEvents.has(eventKey)) {
++      await releaseUndispatchedReaction(event);
++      respond(response, 409, { accepted: false, status: 'unavailable' });
++      return;
++    }
++    const binding = residentSessionByResident.get(event.residentId);
++    const stream = binding && nativeAudioActivation && binding.activationId === nativeAudioActivation.id
++      ? reactionClients.get(binding.id) : undefined;
++    if (!binding || !stream || stream.destroyed || stream.writableEnded) {
++      await releaseUndispatchedReaction(event);
++      respond(response, 409, { accepted: false, status: 'unavailable' });
++      return;
++    }
++    const now = Date.now();
++    const reactionId = randomUUID();
++    const expiresAt = Math.min(event.expiresAt, now + NATIVE_REACTION_TTL_MS);
++    const timer = setTimeout(() => { void expireReaction(reactionId); }, Math.max(1, expiresAt - now));
++    const reaction: ActiveNativeReaction = {
++      ...event, reactionId, residentSessionId: binding.id, expiresAt, timeout: timer,
++    };
++    activeReactions.set(reactionId, reaction);
++    seenReactionEvents.set(eventKey, expiresAt);
++    try {
++      stream.write(`event: native-reaction\ndata: ${JSON.stringify({ version: 1, type: 'native.reaction.dispatch',
++        reactionId, eventId: event.eventId, residentId: event.residentId, context: event.context,
++        causalDepth: event.causalDepth, expiresAt })}\n\n`);
++    } catch {
++      removeReaction(reactionId);
++      await releaseUndispatchedReaction(event);
++      respond(response, 409, { accepted: false, status: 'unavailable' });
++      return;
++    }
++    respond(response, 202, { accepted: true, reactionId, expiresAt });
++  };
++
++  const nativeReactionAck = async (request: IncomingMessage, response: ServerResponse): Promise<void> => {
++    let body: unknown;
++    try { body = await readSmallJson(request, 512); } catch {
++      respond(response, 400, { accepted: false, error: 'Invalid native reaction acknowledgement.' });
++      return;
++    }
++    if (!body || typeof body !== 'object' || Array.isArray(body)) {
++      respond(response, 400, { accepted: false, error: 'Invalid native reaction acknowledgement.' });
++      return;
++    }
++    const payload = body as Record<string, unknown>;
++    if (!objectHasExactKeys(payload, ['reactionId', 'residentSessionId', 'status'])
++      || !safeString(payload.reactionId, 128) || !safeString(payload.residentSessionId, 128)
++      || !['accepted', 'busy', 'unavailable'].includes(String(payload.status))) {
++      respond(response, 400, { accepted: false, error: 'Invalid native reaction acknowledgement.' });
++      return;
++    }
++    const reaction = activeReactions.get(payload.reactionId);
++    if (!reaction || reaction.residentSessionId !== payload.residentSessionId || reaction.expiresAt <= Date.now()) {
++      respond(response, 410, { accepted: false, error: 'Native reaction dispatch expired.' });
++      return;
++    }
++    if (reaction.acknowledged) {
++      respond(response, 409, { accepted: false, error: 'Native reaction was already acknowledged.' });
++      return;
++    }
++    try {
++      const ack = await reactionAck(reaction, payload.status as 'accepted' | 'busy' | 'unavailable');
++      if (ack.type !== 'ptt.reaction.ack' || ack.reactionId !== reaction.reactionId || ack.eventId !== reaction.eventId
++        || ack.residentId !== reaction.residentId || ack.status !== payload.status) {
++        removeReaction(reaction.reactionId);
++        respond(response, 409, { accepted: false, status: 'unavailable' });
++        return;
++      }
++      if (payload.status !== 'accepted') removeReaction(reaction.reactionId);
++      else reaction.acknowledged = 'accepted';
++      respond(response, 200, { accepted: payload.status === 'accepted', status: payload.status });
++    } catch {
++      removeReaction(reaction.reactionId);
++      respond(response, 503, { accepted: false, status: 'unavailable' });
++    }
++  };
++
++  const nativeReactionSpeech = async (request: IncomingMessage, response: ServerResponse, finish: boolean): Promise<void> => {
++    let body: unknown;
++    try { body = await readSmallJson(request, 2_048); } catch {
++      respond(response, 400, { accepted: false, error: 'Invalid native reaction speech event.' });
++      return;
++    }
++    if (!body || typeof body !== 'object' || Array.isArray(body)) {
++      respond(response, 400, { accepted: false, error: 'Invalid native reaction speech event.' });
++      return;
++    }
++    const payload = body as Record<string, unknown>;
++    const keys = finish ? ['reactionId', 'residentSessionId', 'responseId', 'itemId', 'playback', ...(payload.playback === 'completed' ? ['transcript'] : [])]
++      : ['reactionId', 'residentSessionId', 'responseId', 'itemId'];
++    if (!objectHasExactKeys(payload, keys) || !safeString(payload.reactionId, 128)
++      || !safeString(payload.residentSessionId, 128) || !safeString(payload.responseId, 160)
++      || !/^[A-Za-z0-9_.:-]+$/.test(payload.responseId)
++      || !safeString(payload.itemId, 160) || !/^[A-Za-z0-9_.:-]+$/.test(payload.itemId)
++      || (finish && payload.playback !== 'completed' && payload.playback !== 'interrupted')
++      || (finish && payload.playback === 'completed' && (!safeString(payload.transcript, MAX_NATIVE_TRANSCRIPT_BYTES)
++        || Buffer.byteLength(payload.transcript, 'utf8') > MAX_NATIVE_TRANSCRIPT_BYTES
++        || /[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f]/.test(payload.transcript)))) {
++      respond(response, 400, { accepted: false, error: 'Invalid native reaction speech event.' });
++      return;
++    }
++    const reaction = activeReactions.get(payload.reactionId);
++    if (!reaction || reaction.residentSessionId !== payload.residentSessionId || reaction.expiresAt <= Date.now()) {
++      respond(response, 410, { accepted: false, error: 'Native reaction dispatch expired.' });
++      return;
++    }
++    if (!reaction.acknowledged) {
++      respond(response, 409, { accepted: false, error: 'Native reaction was not accepted.' });
++      return;
++    }
++    if (finish) {
++      if (reaction.responseId !== payload.responseId || reaction.itemId !== payload.itemId) {
++        respond(response, 409, { accepted: false, error: 'Native reaction speech correlation does not match.' });
++        return;
++      }
++    } else if (reaction.responseId) {
++      respond(response, 409, { accepted: false, error: 'Native reaction speech already started.' });
++      return;
++    }
++    const command = finish
++      ? { version: 1, type: 'ptt.reaction.speech.finish', reactionId: reaction.reactionId, residentId: reaction.residentId,
++        eventId: reaction.eventId, responseId: payload.responseId, itemId: payload.itemId, playback: payload.playback,
++        ...(payload.playback === 'completed' ? { transcript: payload.transcript } : {}), at: Date.now() }
++      : { version: 1, type: 'ptt.reaction.speech.start', reactionId: reaction.reactionId, residentId: reaction.residentId,
++        eventId: reaction.eventId, responseId: payload.responseId, itemId: payload.itemId, at: Date.now() };
++    try {
++      const ack = await requestVillageIpc(command);
++      const expected = finish ? payload.playback === 'interrupted' ? 'interrupted' : 'finished' : 'started';
++      if (ack.type !== 'ptt.reaction.speech.ack' || ack.reactionId !== reaction.reactionId
++        || ack.eventId !== reaction.eventId || ack.status !== expected) {
++        if (finish) removeReaction(reaction.reactionId);
++        respond(response, 409, { accepted: false, status: ack.status });
++        return;
++      }
++      if (finish) removeReaction(reaction.reactionId);
++      else { reaction.responseId = String(payload.responseId); reaction.itemId = String(payload.itemId); }
++      respond(response, 200, { accepted: true, status: expected });
++    } catch {
++      if (finish) removeReaction(reaction.reactionId);
++      respond(response, 503, { accepted: false, error: 'Village reaction speech tracking is unavailable.' });
++    }
++  };
++
+   const nativeSpeechStart = async (request: IncomingMessage, response: ServerResponse): Promise<void> => {
+     const payload = await readNativeSpeechPayload(request, response, 'start');
+     if (!payload) return;
+@@ -738,10 +1201,62 @@ export function createPttServer(port: number): PttServer {
+     handleRequest(request, response) {
+       const pathname = request.url?.split('?')[0];
+       if (!pathname?.startsWith('/boson-ptt/')) return false;
+-      if (!isSameOriginPttRequest(request, viewerOrigins)) {
++      const relayPath = pathname === '/boson-ptt/native-audio/state' || pathname === '/boson-ptt/reaction/dispatch';
++      const localRelayRequest = relayPath && !request.headers.origin
++        && typeof request.headers.host === 'string'
++        && new Set([...viewerOrigins].map((value) => new URL(value).host)).has(request.headers.host);
++      if (!localRelayRequest && !isSameOriginPttRequest(request, viewerOrigins)) {
+         respond(response, 403, { available: false, error: 'Local viewer requests only.' });
+         return true;
+       }
++      if (pathname === '/boson-ptt/reaction/stream' && request.method === 'GET') {
++        openNativeReactionStream(request, response);
++        return true;
++      }
++      if (pathname === '/boson-ptt/native-audio/state') {
++        if (request.method !== 'POST') {
++          respond(response, 405, { accepted: false, error: 'Method not allowed.' });
++          return true;
++        }
++        void updateNativeAudioState(request, response);
++        return true;
++      }
++      if (pathname === '/boson-ptt/native-audio/activate') {
++        if (request.method !== 'POST') {
++          respond(response, 405, { available: false, error: 'Method not allowed.' });
++          return true;
++        }
++        void nativeAudioActivate(request, response);
++        return true;
++      }
++      if (pathname === '/boson-ptt/native-audio/deactivate') {
++        if (request.method !== 'POST') {
++          respond(response, 405, { accepted: false, error: 'Method not allowed.' });
++          return true;
++        }
++        void nativeAudioDeactivate(request, response);
++        return true;
++      }
++      if (pathname === '/boson-ptt/reaction/dispatch') {
++        if (request.method !== 'POST') {
++          respond(response, 405, { accepted: false, error: 'Method not allowed.' });
++          return true;
++        }
++        void publishNativeReaction(request, response);
++        return true;
++      }
++      if (request.method === 'POST' && pathname === '/boson-ptt/reaction/ack') {
++        void nativeReactionAck(request, response);
++        return true;
++      }
++      if (request.method === 'POST' && pathname === '/boson-ptt/reaction/speech/start') {
++        void nativeReactionSpeech(request, response, false);
++        return true;
++      }
++      if (request.method === 'POST' && pathname === '/boson-ptt/reaction/speech/finish') {
++        void nativeReactionSpeech(request, response, true);
++        return true;
++      }
+       if (pathname === '/boson-ptt/status' && request.method === 'GET') {
+         const available = Boolean(apiKey && process.env.BOSON_VILLAGE_IPC_SOCKET) && turnsUsed < MAX_TURNS_PER_RUN && !closed;
+         respond(response, 200, {
+@@ -798,11 +1313,17 @@ export function createPttServer(port: number): PttServer {
+     },
+     close() {
+       closed = true;
++      clearInterval(closeInactiveSessions);
++      for (const reactionId of activeReactions.keys()) void expireReaction(reactionId);
++      for (const stream of reactionClients.values()) if (!stream.writableEnded) stream.end();
++      reactionClients.clear();
+       for (const [turnId, turn] of activeTurns) {
+         clearTimeout(turn.expires);
+         void requestVillageIpc({ version: 1, type: 'ptt.cancel', turnId, at: Date.now() }).catch(() => undefined);
+       }
+       activeTurns.clear();
++      nativeAudioActivation = undefined;
++      residentSnapshot = undefined;
+       residentSessionByResident.clear();
+       residentSessionById.clear();
+     },
+diff --git a/packages/minecraft/src/village-event.test.ts b/packages/minecraft/src/village-event.test.ts
+index 6487cba..4d78602 100644
+--- a/packages/minecraft/src/village-event.test.ts
++++ b/packages/minecraft/src/village-event.test.ts
+@@ -1,6 +1,6 @@
+ import assert from 'node:assert/strict';
+ import test from 'node:test';
+-import { asSemanticResponse, createVillageDialogueEvent, isVillagePttCommand, isVillageResidentPositionsEvent } from './village-event.ts';
++import { asSemanticResponse, createVillageDialogueEvent, isVillageNativeReactionEvent, isVillagePttCommand, isVillageResidentPositionsEvent } from './village-event.ts';
+ 
+ test('dialogue event has a stable speaker, line, world position, listener, and timestamp contract', () => {
+   const event = createVillageDialogueEvent({
+@@ -87,14 +87,51 @@ test('final player speech IPC is turn/session/item bound and rejects client spea
+   assert.equal(isVillagePttCommand({ ...common, type: 'ptt.player.speech.finish', transcript: 'The gardens need water.', position: { x: 0, y: 0, z: 0 } }), false);
+ });
+ 
++test('native reaction IPC validates server-correlated ACK and speech lifecycle commands', () => {
++  const common = { version: 1, eventId: 'event-12345678', residentId: 'mira', at: Date.now() };
++  const reactionId = 'reaction-12345678';
++  assert.equal(isVillagePttCommand({ ...common, type: 'ptt.reaction.ack', status: 'unavailable' }), true);
++  assert.equal(isVillagePttCommand({ ...common, type: 'ptt.reaction.ack', status: 'accepted', reactionId }), true);
++  assert.equal(isVillagePttCommand({ ...common, type: 'ptt.reaction.ack', status: 'busy', reactionId }), true);
++  assert.equal(isVillagePttCommand({ ...common, type: 'ptt.reaction.ack', status: 'accepted' }), false);
++  assert.equal(isVillagePttCommand({ ...common, type: 'ptt.reaction.ack', status: 'unavailable', reactionId, extra: true }), false);
++  assert.equal(isVillagePttCommand({ ...common, type: 'ptt.reaction.ack', status: 'accepted', reactionId, turnId: 'turn-12345678' }), false);
++
++  const speech = { ...common, reactionId, responseId: 'resp_1', itemId: 'item_1' };
++  assert.equal(isVillagePttCommand({ ...speech, type: 'ptt.reaction.speech.start' }), true);
++  assert.equal(isVillagePttCommand({ ...speech, type: 'ptt.reaction.speech.finish', playback: 'completed', transcript: '[REDACTED SYNTHETIC TEST TRANSCRIPT]' }), true);
++  assert.equal(isVillagePttCommand({ ...speech, type: 'ptt.reaction.speech.finish', playback: 'interrupted' }), true);
++  assert.equal(isVillagePttCommand({ ...speech, type: 'ptt.reaction.speech.finish', playback: 'interrupted', transcript: '[REDACTED SYNTHETIC TEST TRANSCRIPT]' }), false);
++  assert.equal(isVillagePttCommand({ ...speech, type: 'ptt.reaction.speech.finish', playback: 'completed' }), false);
++  assert.equal(isVillagePttCommand({ ...speech, type: 'ptt.reaction.speech.start', position: { x: 0, y: 0, z: 0 } }), false);
++});
++
+ test('resident position snapshots accept only bounded, authoritative-shaped coordinates', () => {
+   const event = {
+-    type: 'village.residents', timestamp: Date.now(),
++    type: 'village.residents', timestamp: Date.now(), playerPosition: { x: 0, y: 64, z: 0 },
+     residents: [{ residentId: 'mira', name: 'Anna', position: { x: 1.5, y: 64, z: -2 } }],
+   };
+   assert.equal(isVillageResidentPositionsEvent(event), true);
+   assert.equal(isVillageResidentPositionsEvent({ ...event, extra: true }), false);
++  const { playerPosition: _playerPosition, ...withoutPlayerPosition } = event;
++  assert.equal(isVillageResidentPositionsEvent(withoutPlayerPosition), false);
+   assert.equal(isVillageResidentPositionsEvent({ ...event, residents: [{ ...event.residents[0], residentId: 'bad id' }] }), false);
+   assert.equal(isVillageResidentPositionsEvent({ ...event, residents: [{ ...event.residents[0], position: { x: Infinity, y: 64, z: 0 } }] }), false);
++  assert.equal(isVillageResidentPositionsEvent({ ...event, playerPosition: { x: Infinity, y: 64, z: 0 } }), false);
+   assert.equal(isVillageResidentPositionsEvent({ ...event, residents: [event.residents[0], event.residents[0]] }), false);
+ });
++
++test('native reaction candidates have exact bounded engine-owned fields and short expiry', () => {
++  const now = Date.now();
++  const event = {
++    version: 1, type: 'village.native.reaction', eventId: 'event-12345678', residentId: 'mira',
++    origin: 'routine', causalDepth: 0, context: 'You just finished tending the west garden.',
++    createdAt: now, expiresAt: now + 30_000,
++  };
++  assert.equal(isVillageNativeReactionEvent(event, now), true);
++  assert.equal(isVillageNativeReactionEvent({ ...event, clientPosition: { x: 0, y: 0, z: 0 } }, now), false);
++  assert.equal(isVillageNativeReactionEvent({ ...event, origin: 'client' }, now), false);
++  assert.equal(isVillageNativeReactionEvent({ ...event, expiresAt: now + 30_001 }, now), false);
++  assert.equal(isVillageNativeReactionEvent({ ...event, createdAt: now - 30_001 }, now), false);
++  assert.equal(isVillageNativeReactionEvent({ ...event, causalDepth: 3 }, now), false);
++});
+diff --git a/packages/minecraft/src/village-event.ts b/packages/minecraft/src/village-event.ts
+index 76921cd..5ebdd31 100644
+--- a/packages/minecraft/src/village-event.ts
++++ b/packages/minecraft/src/village-event.ts
+@@ -81,9 +81,40 @@ export interface VillageNativePttEndCommand {
+   at: number;
+ }
+ 
++export interface VillageNativeReactionAckCommand {
++  version: 1;
++  type: 'ptt.reaction.ack';
++  reactionId?: string;
++  eventId: string;
++  residentId: string;
++  status: 'accepted' | 'busy' | 'unavailable';
++  at: number;
++}
++
++interface VillageNativeReactionSpeechCorrelation {
++  version: 1;
++  reactionId: string;
++  eventId: string;
++  residentId: string;
++  responseId: string;
++  itemId: string;
++  at: number;
++}
++
++export interface VillageNativeReactionSpeechStartCommand extends VillageNativeReactionSpeechCorrelation {
++  type: 'ptt.reaction.speech.start';
++}
++
++export interface VillageNativeReactionSpeechFinishCommand extends VillageNativeReactionSpeechCorrelation {
++  type: 'ptt.reaction.speech.finish';
++  playback: 'completed' | 'interrupted';
++  transcript?: string;
++}
++
+ export type VillagePttCommand = VillagePttBeginCommand | VillageNativePttBeginCommand | VillagePttCompleteCommand | VillagePttCancelCommand
+   | VillagePttBindResidentSessionCommand | VillageResidentSpeechStartCommand
+-  | VillageResidentSpeechFinishCommand | VillagePlayerSpeechFinishCommand | VillageNativePttEndCommand;
++  | VillageResidentSpeechFinishCommand | VillagePlayerSpeechFinishCommand | VillageNativePttEndCommand
++  | VillageNativeReactionAckCommand | VillageNativeReactionSpeechStartCommand | VillageNativeReactionSpeechFinishCommand;
+ 
+ export interface VillagePttBeginContext {
+   id: string;
+@@ -114,16 +145,54 @@ export type VillagePttAck =
+ const TURN_ID_PATTERN = /^[A-Za-z0-9_-]{8,128}$/;
+ const SESSION_ID_PATTERN = /^[A-Za-z0-9_-]{8,128}$/;
+ const PROVIDER_ID_PATTERN = /^[A-Za-z0-9_.:-]{1,160}$/;
++const REACTION_ID_PATTERN = /^[A-Za-z0-9_-]{8,128}$/;
++const EVENT_ID_PATTERN = /^[A-Za-z0-9_.:-]{8,128}$/;
++const RESIDENT_ID_PATTERN = /^[A-Za-z0-9_-]{1,64}$/;
+ const MAX_NATIVE_TRANSCRIPT_BYTES = 1_000;
+ export const MAX_PTT_COMMAND_BYTES = 8_192;
+ 
+ export function isVillagePttCommand(value: unknown): value is VillagePttCommand {
+   if (!value || typeof value !== 'object' || Array.isArray(value)) return false;
+   const command = value as Record<string, unknown>;
+-  if (command.version !== 1 || !TURN_ID_PATTERN.test(String(command.turnId ?? ''))
+-    || typeof command.at !== 'number' || !Number.isSafeInteger(command.at)
++  if (command.version !== 1 || typeof command.at !== 'number' || !Number.isSafeInteger(command.at)
+     || Math.abs(Date.now() - command.at) > 30_000) return false;
+ 
++  if (command.type === 'ptt.reaction.ack') {
++    const dispatched = Object.hasOwn(command, 'reactionId');
++    if (Object.keys(command).sort().join(',') !== (dispatched
++      ? 'at,eventId,reactionId,residentId,status,type,version'
++      : 'at,eventId,residentId,status,type,version')) return false;
++    if (!EVENT_ID_PATTERN.test(String(command.eventId ?? '')) || !RESIDENT_ID_PATTERN.test(String(command.residentId ?? ''))
++      || !['accepted', 'busy', 'unavailable'].includes(String(command.status))) return false;
++    return dispatched
++      ? REACTION_ID_PATTERN.test(String(command.reactionId ?? ''))
++        && (command.status === 'accepted' || command.status === 'busy' || command.status === 'unavailable')
++      : command.status === 'unavailable';
++  }
++  if (command.type === 'ptt.reaction.speech.start' || command.type === 'ptt.reaction.speech.finish') {
++    const finishing = command.type === 'ptt.reaction.speech.finish';
++    const hasTranscript = Object.hasOwn(command, 'transcript');
++    const keys = finishing
++      ? hasTranscript ? 'at,eventId,itemId,playback,reactionId,residentId,responseId,transcript,type,version'
++        : 'at,eventId,itemId,playback,reactionId,residentId,responseId,type,version'
++      : 'at,eventId,itemId,reactionId,residentId,responseId,type,version';
++    if (Object.keys(command).sort().join(',') !== keys
++      || !REACTION_ID_PATTERN.test(String(command.reactionId ?? ''))
++      || !EVENT_ID_PATTERN.test(String(command.eventId ?? ''))
++      || !RESIDENT_ID_PATTERN.test(String(command.residentId ?? ''))
++      || !PROVIDER_ID_PATTERN.test(String(command.responseId ?? ''))
++      || !PROVIDER_ID_PATTERN.test(String(command.itemId ?? ''))) return false;
++    if (!finishing) return true;
++    if (command.playback !== 'completed' && command.playback !== 'interrupted') return false;
++    if (!hasTranscript) return command.playback === 'interrupted';
++    return command.playback === 'completed' && typeof command.transcript === 'string'
++      && command.transcript.trim().length > 0
++      && Buffer.byteLength(command.transcript, 'utf8') <= MAX_NATIVE_TRANSCRIPT_BYTES
++      && !/[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f]/.test(command.transcript);
++  }
++
++  if (!TURN_ID_PATTERN.test(String(command.turnId ?? ''))) return false;
++
+   if (command.type === 'ptt.begin' || command.type === 'ptt.native.begin' || command.type === 'ptt.cancel') {
+     return Object.keys(command).sort().join(',') === 'at,turnId,type,version';
+   }
+@@ -197,14 +266,46 @@ export interface VillageDialogueEvent {
+ export interface VillageResidentPositionsEvent {
+   type: 'village.residents';
+   timestamp: number;
++  playerPosition: { x: number; y: number; z: number };
+   residents: readonly { residentId: string; name: string; position: { x: number; y: number; z: number } }[];
+ }
+ 
++export interface VillageNativeReactionEvent {
++  version: 1;
++  type: 'village.native.reaction';
++  eventId: string;
++  residentId: string;
++  origin: 'routine' | 'player' | 'resident' | 'native-reaction';
++  causalDepth: number;
++  context: string;
++  createdAt: number;
++  expiresAt: number;
++}
++
++export function isVillageNativeReactionEvent(value: unknown, now = Date.now()): value is VillageNativeReactionEvent {
++  if (!value || typeof value !== 'object' || Array.isArray(value)) return false;
++  const event = value as Record<string, unknown>;
++  if (Object.keys(event).sort().join(',') !== 'causalDepth,context,createdAt,eventId,expiresAt,origin,residentId,type,version'
++    || event.version !== 1 || event.type !== 'village.native.reaction'
++    || typeof event.eventId !== 'string' || !EVENT_ID_PATTERN.test(event.eventId)
++    || typeof event.residentId !== 'string' || !RESIDENT_ID_PATTERN.test(event.residentId)
++    || !['routine', 'player', 'resident', 'native-reaction'].includes(String(event.origin))
++    || !Number.isSafeInteger(event.causalDepth) || (event.causalDepth as number) < 0 || (event.causalDepth as number) > 2
++    || typeof event.context !== 'string' || event.context.trim().length === 0
++    || Buffer.byteLength(event.context, 'utf8') > 1_000
++    || /[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f]/.test(event.context)
++    || !Number.isSafeInteger(event.createdAt) || !Number.isSafeInteger(event.expiresAt)) return false;
++  const createdAt = event.createdAt as number;
++  const expiresAt = event.expiresAt as number;
++  return createdAt <= now + 1_000 && expiresAt > createdAt && expiresAt - createdAt <= 30_000;
++}
++
+ export function isVillageResidentPositionsEvent(value: unknown): value is VillageResidentPositionsEvent {
+   if (!value || typeof value !== 'object' || Array.isArray(value)) return false;
+   const event = value as Record<string, unknown>;
+-  if (Object.keys(event).sort().join(',') !== 'residents,timestamp,type'
++  if (Object.keys(event).sort().join(',') !== 'playerPosition,residents,timestamp,type'
+     || event.type !== 'village.residents' || !Number.isSafeInteger(event.timestamp)
++    || !isValidWorldPosition(event.playerPosition)
+     || !Array.isArray(event.residents) || event.residents.length > 32) return false;
+   const residentIds = new Set<string>();
+   return event.residents.every((raw) => {
+@@ -214,16 +315,20 @@ export function isVillageResidentPositionsEvent(value: unknown): value is Villag
+       || typeof resident.residentId !== 'string' || !/^[A-Za-z0-9_-]{1,64}$/.test(resident.residentId)
+       || residentIds.has(resident.residentId)
+       || typeof resident.name !== 'string' || resident.name.length < 1 || resident.name.length > 80
+-      || !resident.position || typeof resident.position !== 'object' || Array.isArray(resident.position)) return false;
+-    const position = resident.position as Record<string, unknown>;
+-    if (Object.keys(position).sort().join(',') !== 'x,y,z'
+-      || ![position.x, position.y, position.z].every((coordinate) => typeof coordinate === 'number'
+-        && Number.isFinite(coordinate) && Math.abs(coordinate) <= 1_000_000)) return false;
++      || !isValidWorldPosition(resident.position)) return false;
+     residentIds.add(resident.residentId);
+     return true;
+   });
+ }
+ 
++function isValidWorldPosition(value: unknown): value is { x: number; y: number; z: number } {
++  if (!value || typeof value !== 'object' || Array.isArray(value)) return false;
++  const position = value as Record<string, unknown>;
++  return Object.keys(position).sort().join(',') === 'x,y,z'
++    && [position.x, position.y, position.z].every((coordinate) => typeof coordinate === 'number'
++      && Number.isFinite(coordinate) && Math.abs(coordinate) <= 1_000_000);
++}
++
+ export function createVillageDialogueEvent(input: {
+   eventId?: string;
+   lineId?: string;
+diff --git a/scripts/run-village-with-dialogue-relay.mjs b/scripts/run-village-with-dialogue-relay.mjs
+index 7a96d15..294f0b8 100644
+--- a/scripts/run-village-with-dialogue-relay.mjs
++++ b/scripts/run-village-with-dialogue-relay.mjs
+@@ -3,6 +3,7 @@ import { spawn } from 'node:child_process';
+ import { createInterface } from 'node:readline';
+ import { once } from 'node:events';
+ import { createVillagePttIpcBridge } from './village-ptt-ipc-bridge.mjs';
++import { isVillageNativeReactionEvent, isVillageResidentPositionsEvent } from '../packages/minecraft/src/village-event.ts';
+ 
+ const viewerPort = Number(process.env.BOSON_EXPLORER_VIEWER_PORT ?? process.env.BOSON_VIEWER_PORT ?? 3000);
+ if (!Number.isInteger(viewerPort) || viewerPort < 1 || viewerPort > 65_535) {
+@@ -40,8 +41,9 @@ async function relayDialogue(event) {
+ }
+ 
+ async function relayResidentPositions(event) {
++  if (!isVillageResidentPositionsEvent(event)) return;
+   try {
+-    await fetch(`http://127.0.0.1:${viewerPort}/boson-residents`, {
++    await fetch(`http://127.0.0.1:${viewerPort}/boson-ptt/native-audio/state`, {
+       method: 'POST',
+       headers: { 'content-type': 'application/json' },
+       body: JSON.stringify(event),
+@@ -52,6 +54,31 @@ async function relayResidentPositions(event) {
+   }
+ }
+ 
++function releaseReactionEvent(event) {
++  if (typeof event?.eventId !== 'string' || !/^[A-Za-z0-9_.:-]{8,128}$/.test(event.eventId)
++    || typeof event?.residentId !== 'string' || !/^[A-Za-z0-9_-]{1,64}$/.test(event.residentId)
++    || !village.stdin?.writable || stopping) return;
++  village.stdin.write(`${JSON.stringify({ version: 1, type: 'ptt.reaction.ack', eventId: event.eventId,
++    residentId: event.residentId, status: 'unavailable', at: Date.now() })}\n`);
++}
++
++async function relayNativeReaction(event) {
++  if (!isVillageNativeReactionEvent(event)) {
++    releaseReactionEvent(event);
++    return;
++  }
++  try {
++    await fetch(`http://127.0.0.1:${viewerPort}/boson-ptt/reaction/dispatch`, {
++      method: 'POST',
++      headers: { 'content-type': 'application/json' },
++      body: JSON.stringify(event),
++      signal: AbortSignal.timeout(3_000),
++    });
++  } catch {
++    releaseReactionEvent(event);
++  }
++}
++
+ async function stop(signal = 'SIGTERM') {
+   if (stopping) return;
+   stopping = true;
+@@ -97,6 +124,10 @@ for await (const line of lines) {
+     void relayResidentPositions(event);
+     continue;
+   }
++  if (event?.type === 'village.native.reaction') {
++    void relayNativeReaction(event);
++    continue;
++  }
+   if (event?.type !== 'village.dialogue') {
+     process.stdout.write('Village simulator emitted a non-dialogue event.\n');
+     continue;
+diff --git a/scripts/village-ptt-ipc-bridge.mjs b/scripts/village-ptt-ipc-bridge.mjs
+index 8fb4721..8d5278c 100644
+--- a/scripts/village-ptt-ipc-bridge.mjs
++++ b/scripts/village-ptt-ipc-bridge.mjs
+@@ -7,6 +7,22 @@ function bridgeError(status) {
+ }
+ 
+ function pttAckDescriptor(command, status) {
++  if (command?.type === 'ptt.reaction.ack') {
++    return {
++      version: 1, type: 'ptt.reaction.ack',
++      ...(command.reactionId ? { reactionId: command.reactionId } : {}),
++      eventId: command.eventId, residentId: command.residentId,
++      status: ['accepted', 'busy', 'unavailable'].includes(status) ? status : 'unavailable',
++    };
++  }
++  if (command?.type === 'ptt.reaction.speech.start' || command?.type === 'ptt.reaction.speech.finish') {
++    return {
++      version: 1, type: 'ptt.reaction.speech.ack', reactionId: command.reactionId,
++      eventId: command.eventId, residentId: command.residentId,
++      responseId: command.responseId, itemId: command.itemId,
++      status: status === 'started' || status === 'finished' ? status : 'unavailable',
++    };
++  }
+   if (!command || typeof command.turnId !== 'string') return bridgeError(status);
+   if (command.type === 'ptt.begin' || command.type === 'ptt.native.begin' || command.type === 'ptt.complete' || command.type === 'ptt.cancel') {
+     const phase = command.type === 'ptt.begin' || command.type === 'ptt.native.begin' ? 'begin' : command.type === 'ptt.cancel' ? 'cancel' : 'complete';
+@@ -24,8 +40,9 @@ function pttAckDescriptor(command, status) {
+   };
+ }
+ 
+-function ackKey(type, phase, turnId, responseId, itemId) {
+-  return `${type}:${phase ?? ''}:${turnId}:${responseId ?? ''}:${itemId ?? ''}`;
++function ackKey(type, phase, turnId, responseId, itemId, reactionId, eventId, residentId) {
++  return JSON.stringify([type, phase ?? null, turnId ?? null, reactionId ?? null, eventId ?? null,
++    residentId ?? null, responseId ?? null, itemId ?? null]);
+ }
+ 
+ export function createVillagePttIpcBridge({ socketPath, village, isStopping = () => false, onError = () => {}, timeoutMs = 8_000 }) {
+@@ -34,10 +51,11 @@ export function createVillagePttIpcBridge({ socketPath, village, isStopping = ()
+   let ipcServer;
+ 
+   function deliverAck(event) {
+-    if (!event || !['ptt.ack', 'ptt.session.ack', 'ptt.speech.ack', 'ptt.player.speech.ack', 'ptt.native.ack'].includes(event.type)
+-      || typeof event.turnId !== 'string') return false;
++    if (!event || !['ptt.ack', 'ptt.session.ack', 'ptt.speech.ack', 'ptt.player.speech.ack', 'ptt.native.ack',
++      'ptt.reaction.ack', 'ptt.reaction.speech.ack'].includes(event.type)
++      || (typeof event.turnId !== 'string' && typeof event.reactionId !== 'string' && typeof event.eventId !== 'string')) return false;
+     const phase = event.type === 'ptt.ack' ? event.phase : undefined;
+-    const key = ackKey(event.type, phase, event.turnId, event.responseId, event.itemId);
++    const key = ackKey(event.type, phase, event.turnId, event.responseId, event.itemId, event.reactionId, event.eventId, event.residentId);
+     const pending = pendingAcks.get(key);
+     if (!pending) return true;
+     clearTimeout(pending.timer);
+@@ -59,7 +77,8 @@ export function createVillagePttIpcBridge({ socketPath, village, isStopping = ()
+     }
+ 
+     const errorAck = pttAckDescriptor(command, 'unavailable');
+-    const key = ackKey(errorAck.type, errorAck.phase, command.turnId, errorAck.responseId, errorAck.itemId);
++    const key = ackKey(errorAck.type, errorAck.phase, command.turnId, errorAck.responseId, errorAck.itemId,
++      errorAck.reactionId, errorAck.eventId, errorAck.residentId);
+     if (pendingAcks.has(key)) {
+       socket.end(`${JSON.stringify(pttAckDescriptor(command, 'duplicate'))}\n`);
+       return;
+diff --git a/scripts/village-ptt-ipc-bridge.test.mjs b/scripts/village-ptt-ipc-bridge.test.mjs
+index 2ec015e..e0207ec 100644
+--- a/scripts/village-ptt-ipc-bridge.test.mjs
++++ b/scripts/village-ptt-ipc-bridge.test.mjs
+@@ -33,3 +33,70 @@ test('player-speech acknowledgement is delivered by item correlation through the
+     await rm(directory, { recursive: true, force: true });
+   }
+ });
++
++test('native reaction acknowledgements correlate by event before dispatch and reaction after dispatch', async () => {
++  const directory = await mkdtemp(join(tmpdir(), 'boson-reaction-bridge-'));
++  const socketPath = join(directory, 'village.sock');
++  const village = { stdin: new PassThrough(), stdout: new PassThrough() };
++  const bridge = createVillagePttIpcBridge({ socketPath, village });
++  try {
++    await bridge.start();
++    const commands = [
++      { version: 1, type: 'ptt.reaction.ack', eventId: 'event-00000001', residentId: 'mira', status: 'unavailable', at: Date.now() },
++      { version: 1, type: 'ptt.reaction.ack', reactionId: 'reaction-00000002', eventId: 'event-00000002', residentId: 'pip', status: 'accepted', at: Date.now() },
++    ];
++    for (const command of commands) {
++      const responsePromise = new Promise((resolve, reject) => {
++        const socket = createConnection(socketPath);
++        socket.once('error', reject);
++        socket.once('data', (data) => resolve(JSON.parse(String(data))));
++        socket.write(`${JSON.stringify(command)}\n`);
++      });
++      const forwarded = await new Promise((resolve) => village.stdin.once('data', (data) => resolve(JSON.parse(String(data)))));
++      assert.deepEqual(forwarded, command);
++      const { at: _at, ...correlation } = command;
++      const acknowledgement = { version: 1, ...correlation };
++      assert.equal(bridge.deliverAck(acknowledgement), true);
++      assert.deepEqual(await responsePromise, acknowledgement);
++    }
++  } finally {
++    bridge.close();
++    village.stdin.destroy(); village.stdout.destroy();
++    await rm(directory, { recursive: true, force: true });
++  }
++});
++
++test('pre-dispatch unavailable ACKs for one event stay isolated per resident', async () => {
++  const directory = await mkdtemp(join(tmpdir(), 'boson-reaction-recipient-bridge-'));
++  const socketPath = join(directory, 'village.sock');
++  const village = { stdin: new PassThrough(), stdout: new PassThrough() };
++  const bridge = createVillagePttIpcBridge({ socketPath, village });
++  try {
++    await bridge.start();
++    const commands = ['mira', 'pip'].map((residentId) => ({ version: 1, type: 'ptt.reaction.ack',
++      eventId: 'heard-event-123', residentId, status: 'unavailable', at: Date.now() }));
++    const pending = commands.map((command) => new Promise((resolve, reject) => {
++      const socket = createConnection(socketPath);
++      socket.once('error', reject);
++      socket.once('data', (data) => resolve(JSON.parse(String(data))));
++      socket.write(`${JSON.stringify(command)}\n`);
++    }));
++    const forwarded = new Set();
++    while (forwarded.size < commands.length) {
++      const command = await new Promise((resolve) => village.stdin.once('data', (data) => resolve(JSON.parse(String(data)))));
++      forwarded.add(command.residentId);
++    }
++    for (const command of [...commands].reverse()) {
++      const acknowledgement = { version: 1, type: 'ptt.reaction.ack', eventId: command.eventId,
++        residentId: command.residentId, status: 'unavailable' };
++      assert.equal(bridge.deliverAck(acknowledgement), true);
++    }
++    const results = await Promise.all(pending);
++    assert.deepEqual(results.map(({ residentId, status }) => ({ residentId, status })),
++      commands.map(({ residentId, status }) => ({ residentId, status })));
++  } finally {
++    bridge.close();
++    village.stdin.destroy(); village.stdout.destroy();
++    await rm(directory, { recursive: true, force: true });
++  }
++});
