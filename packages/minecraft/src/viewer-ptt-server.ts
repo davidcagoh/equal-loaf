@@ -185,7 +185,12 @@ function respond(response: ServerResponse, status: number, payload: Record<strin
 
 export function isSameOriginPttRequest(request: IncomingMessage, viewerOrigins: ReadonlySet<string>): boolean {
   const origin = request.headers.origin;
-  return Boolean(origin && viewerOrigins.has(origin) && request.headers['sec-fetch-site'] === 'same-origin');
+  if (origin) return viewerOrigins.has(origin) && request.headers['sec-fetch-site'] === 'same-origin';
+  const allowedHosts = new Set([...viewerOrigins].map((value) => new URL(value).host));
+  return request.method === 'GET'
+    && request.url?.split('?')[0] === '/boson-ptt/status'
+    && typeof request.headers.host === 'string' && allowedHosts.has(request.headers.host)
+    && request.headers['sec-fetch-site'] === 'same-origin';
 }
 
 function readSmallJson(request: IncomingMessage, limit = 1_024): Promise<unknown> {

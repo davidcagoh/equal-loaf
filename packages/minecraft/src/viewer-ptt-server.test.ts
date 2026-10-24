@@ -1,11 +1,12 @@
 import assert from 'node:assert/strict';
+import type { IncomingMessage } from 'node:http';
 import { createServer as createHttpServer } from 'node:http';
 import { createServer as createIpcServer } from 'node:net';
 import { mkdtemp, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import test from 'node:test';
-import { createPttServer, isPttBeginAck, isPttModelResponse } from './viewer-ptt-server.ts';
+import { createPttServer, isPttBeginAck, isPttModelResponse, isSameOriginPttRequest } from './viewer-ptt-server.ts';
 import { createVillageCognitionState, getResidentKnowledgeContext, selectResidentIntent } from './village-cognition.ts';
 
 test('PTT model output must use a canonical intent, topic, and compatible resident authored line', () => {
@@ -17,6 +18,22 @@ test('PTT model output must use a canonical intent, topic, and compatible reside
   assert.equal(isPttModelResponse({ playerIntent: 'greeting', topic: 'general', lineId: 'mira-greeting' }, turn), false);
   assert.equal(isPttModelResponse({ playerIntent: 'greet', topic: 'garden', lineId: 'mira-greeting' }, turn), false);
   assert.equal(isPttModelResponse({ playerIntent: 'ask_about_known_topic', topic: 'garden', lineId: 'mira-greeting' }, turn), false);
+});
+
+test('originless same-origin browser status GET is allowed while mutations remain origin-bound', () => {
+  const origins = new Set(['http://127.0.0.1:3000', 'http://localhost:3000']);
+  assert.equal(isSameOriginPttRequest({
+    method: 'GET', url: '/boson-ptt/status', headers: { host: '127.0.0.1:3000', 'sec-fetch-site': 'same-origin' },
+  } as unknown as IncomingMessage, origins), true);
+  assert.equal(isSameOriginPttRequest({
+    method: 'POST', url: '/boson-ptt/begin', headers: { host: '127.0.0.1:3000', 'sec-fetch-site': 'same-origin' },
+  } as unknown as IncomingMessage, origins), false);
+  assert.equal(isSameOriginPttRequest({
+    method: 'GET', url: '/boson-ptt/status', headers: { host: 'attacker.example', 'sec-fetch-site': 'same-origin' },
+  } as unknown as IncomingMessage, origins), false);
+  assert.equal(isSameOriginPttRequest({
+    method: 'GET', url: '/boson-ptt/status', headers: { host: '127.0.0.1:3000', 'sec-fetch-site': 'cross-site' },
+  } as unknown as IncomingMessage, origins), false);
 });
 
 test('validated begin context and model response select the same locally authored resident beat', () => {

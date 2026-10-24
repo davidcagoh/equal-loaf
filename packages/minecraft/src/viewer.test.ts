@@ -4,7 +4,7 @@ import { spawnSync } from 'node:child_process';
 import { createRequire } from 'node:module';
 import { readFileSync } from 'node:fs';
 import { createConnection } from 'node:net';
-import { createServer, get as httpGet, type IncomingMessage, type Server } from 'node:http';
+import { createServer, get as httpGet, request as httpRequest, type IncomingMessage, type Server } from 'node:http';
 import { dirname, join } from 'node:path';
 import type { Duplex } from 'node:stream';
 import test from 'node:test';
@@ -202,6 +202,21 @@ test('binds the Prismarine HTTP viewer to loopback only', async () => {
       request.once('error', reject);
     });
     assert.equal(browserNavigation.statusCode, 200);
+    const browserPttStatus = await new Promise<{ statusCode?: number }>((resolve, reject) => {
+      const request = httpGet(`http://127.0.0.1:${port}/boson-ptt/status`, {
+        headers: { 'sec-fetch-site': 'same-origin' },
+      }, (response) => { response.resume(); resolve(response); });
+      request.once('error', reject);
+    });
+    assert.equal(browserPttStatus.statusCode, 200);
+    const originlessPttBegin = await new Promise<{ statusCode?: number }>((resolve, reject) => {
+      const request = httpRequest(`http://127.0.0.1:${port}/boson-ptt/begin`, {
+        method: 'POST', headers: { 'sec-fetch-site': 'same-origin' },
+      }, (response) => { response.resume(); resolve(response); });
+      request.once('error', reject);
+      request.end();
+    });
+    assert.equal(originlessPttBegin.statusCode, 403);
     const crossSiteApi = await fetch(`http://127.0.0.1:${port}/boson-ptt/status`, {
       headers: { origin: 'https://attacker.example', 'sec-fetch-site': 'cross-site', 'sec-fetch-mode': 'cors', 'sec-fetch-dest': 'empty' },
     });
