@@ -1,14 +1,27 @@
 import assert from 'node:assert/strict';
 import { createHash } from 'node:crypto';
 import { createRequire } from 'node:module';
+import { readFileSync } from 'node:fs';
 import { createConnection } from 'node:net';
 import { createServer, type IncomingMessage, type Server } from 'node:http';
+import { dirname, join } from 'node:path';
 import type { Duplex } from 'node:stream';
 import test from 'node:test';
 import { startLoopbackViewer } from './viewer.ts';
 import { isVillageDialogue, volumeForDistance } from './viewer-audio.js';
 
 const require = createRequire(import.meta.url);
+
+test('renders scripted village dialogue actors with the native villager model in Prismarine Viewer', () => {
+  const prismarineRoot = dirname(require.resolve('prismarine-viewer'));
+  const worldViewSource = readFileSync(join(prismarineRoot, 'viewer', 'lib', 'worldView.js'), 'utf8');
+  const villagerModels = JSON.parse(readFileSync(join(prismarineRoot, 'viewer', 'lib', 'entity', 'entities.json'), 'utf8'));
+  const browserBundle = readFileSync(join(prismarineRoot, 'public', 'index.js'), 'utf8');
+
+  assert.match(worldViewSource, /\['MiraGardener', 'TobinCart', 'PipBaker'\]\.includes\(e\.username\) \? 'villager' : e\.name/);
+  assert.equal(villagerModels.villager.textures.default, 'textures/entity/villager/type/plains');
+  assert.ok(browserBundle.includes('"default":"textures/entity/villager/type/plains"'));
+});
 
 test('maps greater explorer distance to lower speech volume and validates dialogue events', () => {
   assert.ok(volumeForDistance(2) > volumeForDistance(12));

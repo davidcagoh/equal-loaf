@@ -135,6 +135,22 @@ replaceExpected(
   "    bot.on('move', botPosition)\n    worldView.listenToBot(bot)",
   "    bot.on('move', botPosition)\n    botPosition()\n    worldView.listenToBot(bot)"
 )
+replaceExpected(
+  'viewer/lib/worldView.js',
+  'name: e.name, pos: e.position, width: e.width, height: e.height, username: e.username',
+  "name: ['MiraGardener', 'TobinCart', 'PipBaker'].includes(e.username) ? 'villager' : e.name, pos: e.position, width: e.width, height: e.height, username: e.username",
+  2
+)
+replaceExpected(
+  'viewer/lib/entity/entities.json',
+  '"textures": {\n      "farmer": "textures/entity/villager/profession/farmer",',
+  '"textures": {\n      "default": "textures/entity/villager/type/plains",\n      "farmer": "textures/entity/villager/profession/farmer",'
+)
+replaceExpected(
+  'public/index.js',
+  '"textures":{"farmer":"textures/entity/villager/profession/farmer"',
+  '"textures":{"default":"textures/entity/villager/type/plains","farmer":"textures/entity/villager/profession/farmer"'
+)
 
 replaceExpected(
   'public/index.js',
