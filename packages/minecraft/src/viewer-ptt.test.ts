@@ -1,5 +1,52 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
+import { parseCompletedPttResponse } from './viewer-ptt.js';
+
+const allowedLineIds = ['mira-greeting'];
+const boundedResponse = JSON.stringify({ playerIntent: 'greet', topic: 'general', lineId: 'mira-greeting' });
+
+test('completed terminal text replaces accumulated deltas without duplicate content', () => {
+  const parsed = parseCompletedPttResponse({
+    type: 'response.done',
+    response: {
+      status: 'completed',
+      output: [{ type: 'message', role: 'assistant', content: [{ type: 'output_text', text: boundedResponse }] }],
+    },
+  }, `${boundedResponse}${boundedResponse}`, boundedResponse, allowedLineIds);
+
+  assert.deepEqual(parsed, { playerIntent: 'greet', topic: 'general', lineId: 'mira-greeting' });
+});
+
+test('completed final-only response output text is parsed without delta events', () => {
+  const parsed = parseCompletedPttResponse({
+    type: 'response.done',
+    response: {
+      status: 'completed',
+      output: [{ type: 'message', role: 'assistant', content: [{ type: 'output_text', text: boundedResponse }] }],
+    },
+  }, '', null, allowedLineIds);
+
+  assert.deepEqual(parsed, { playerIntent: 'greet', topic: 'general', lineId: 'mira-greeting' });
+});
+
+test('terminal output_text.done is used when response.done has no output array', () => {
+  const parsed = parseCompletedPttResponse({ type: 'response.done', response: { status: 'completed' } }, '', boundedResponse, allowedLineIds);
+
+  assert.deepEqual(parsed, { playerIntent: 'greet', topic: 'general', lineId: 'mira-greeting' });
+});
+
+test('malformed and oversized terminal text remain rejected', () => {
+  const completed = { type: 'response.done', response: { status: 'completed' } };
+
+  assert.equal(parseCompletedPttResponse(completed, '', '{bad json', allowedLineIds), null);
+  assert.equal(parseCompletedPttResponse(completed, '', ' '.repeat(2_001), allowedLineIds), null);
+});
+
+test('failed or incomplete responses cannot accept parseable partial deltas', () => {
+  for (const status of ['failed', 'incomplete', 'cancelled']) {
+    assert.equal(parseCompletedPttResponse({ type: 'response.done', response: { status } }, boundedResponse, null, allowedLineIds), null);
+  }
+});
 
 class FakeElement {
   id = '';
