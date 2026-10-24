@@ -41,6 +41,27 @@ test('mixer layers different speakers, serializes each speaker, and caps active 
   assert.equal(context.closed, true);
 });
 
+test('mixer starts higher-priority queued sources first and rejects sources outside its audible range', () => {
+  const { context, sources } = fakeContext();
+  const states = [];
+  const mixer = new SpatialVoiceMixer({ context, maxConcurrency: 1, onState: (state) => states.push(state) });
+  mixer.setListenerPosition({ x: 0, y: 0, z: 0 });
+  mixer.enqueue({ speakerId: 'blocker', utteranceId: 'active', buffer: {}, position: { x: 1, y: 0, z: 0 } });
+  mixer.enqueue({ speakerId: 'far', utteranceId: 'low-priority', buffer: {}, position: { x: 2, y: 0, z: 0 }, priority: 1 });
+  mixer.enqueue({ speakerId: 'near', utteranceId: 'high-priority', buffer: {}, position: { x: 3, y: 0, z: 0 }, priority: 5 });
+  mixer.enqueue({ speakerId: 'distant', utteranceId: 'outside-range', buffer: {}, position: { x: 48, y: 0, z: 0 }, priority: 10 });
+
+  assert.deepEqual(states.filter(({ type }) => type === 'start').map(({ utteranceId }) => utteranceId), ['active']);
+  assert.equal(states.some(({ type, utteranceId }) => type === 'start' && utteranceId === 'outside-range'), false);
+  assert.equal(mixer.active.has('outside-range'), false);
+
+  sources[0].onended();
+  assert.equal(states.filter(({ type }) => type === 'start').at(-1)?.utteranceId, 'high-priority');
+  sources[1].onended();
+  assert.equal(states.filter(({ type }) => type === 'start').at(-1)?.utteranceId, 'low-priority');
+  mixer.close();
+});
+
 test('stopSpeaker releases only that speaker and removes queued clips', () => {
   const { context } = fakeContext();
   const mixer = new SpatialVoiceMixer({ context, maxConcurrency: 1 });
