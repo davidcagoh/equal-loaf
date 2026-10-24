@@ -32,7 +32,7 @@ printf 'Output: %s\n' "$output"
 printf 'Prepare the existing Boson Dry Run Chrome tab. Keep only intended demo content visible and mute unrelated audio.\n'
 read -r -p 'Press Enter when you are ready to record; the microphone and screen will be captured immediately. '
 
-ffmpeg -hide_banner \
+if ! python3 "$SCRIPT_DIR/ffmpeg-startup-guard.py" ffmpeg -hide_banner \
   -f avfoundation \
   -pixel_format uyvy422 \
   -framerate 30 \
@@ -44,7 +44,10 @@ ffmpeg -hide_banner \
   -c:v libx264 -preset veryfast -crf 23 -pix_fmt yuv420p \
   -c:a aac -b:a 128k -ar 48000 -ac 1 \
   -movflags +faststart \
-  "$output"
+  "$output"; then
+  rm -f "$output"
+  exit 1
+fi
 
 printf 'Recording saved locally: %s\n' "$output"
 printf 'Review the full clip before sharing. It is unedited screen and microphone capture.\n'

@@ -4,12 +4,14 @@ Use `scripts/record-demo.sh [duration_seconds]` to capture the live flow in one 
 
 On the current Mac, AVFoundation device `1` is **Capture screen 0** and audio device `1` is **MacBook Air Microphone**. Override these with `BOSON_SCREEN_DEVICE` and `BOSON_MIC_DEVICE` if device ordering changes. The script captures the screen and microphone only; it does not capture desktop audio or upload the result. MP4 files are saved under the ignored local `recordings/` directory.
 
-The capture helper requests AVFoundation's supported `uyvy422` screen pixel format explicitly. To check screen capture without opening the microphone or saving a video, run:
+The capture helper requests AVFoundation's `uyvy422` screen pixel format explicitly. It gives FFmpeg 12 seconds to initialize and removes a partial output if initialization fails. A timeout usually means Screen Recording permission is missing for the terminal app or the screen device ID is stale. Open **System Settings > Privacy & Security > Screen Recording**, allow the terminal app, then quit and reopen it before retrying. Terminal cannot reliably inspect its own TCC permission state.
+
+For a native macOS screen-only capture check, run the bounded helper below. It uses `screencapture -V` to record a two-second temporary MOV, requests no audio input, and removes the file afterward. This avoids AVFoundation's failing screen-device initialization path.
 
 ```sh
-ffmpeg -hide_banner -f avfoundation -pixel_format uyvy422 -framerate 30 -capture_cursor 1 -capture_mouse_clicks 1 -i "1:none" -t 2 -f null -
+scripts/check-screen-capture.sh
 ```
 
-Replace `1` with the current screen device ID if the device list changes. If the diagnostic reports an initialization error, do not start a microphone recording; resolve screen-capture permission or device selection first.
+The separate FFmpeg screen-only diagnostic remains available by setting `BOSON_CAPTURE_STARTUP_TIMEOUT=5` before the command, but it has hung on this Mac. Its AVFoundation input reached `<AVCaptureScreenInput> opened` but did not initialize within the bounded window, even with an explicit pixel format and a 720p/NV12 retry. The TCC database denied command-line inspection, so the exact permission grant state could not be confirmed. If the native helper fails, do not proceed to the screen-and-microphone recording; fix Screen Recording permission first.
 
 Before recording, keep the existing Boson Dry Run tab visible, reload it to pick up the current demo settings, confirm the viewer and adapter are ready, and mute unrelated audio. Start the capture, perform the spoken action and interruption, then let it finish or stop early with Ctrl+C. Keep the original clip as evidence; identify any edits or splices in a separate version and do not present them as uninterrupted behavior.
