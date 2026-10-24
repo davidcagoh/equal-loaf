@@ -74,6 +74,7 @@ test('renders scripted village dialogue actors with the native villager model in
   const prismarineRoot = dirname(require.resolve('prismarine-viewer'));
   const browserEntrySource = readFileSync(join(prismarineRoot, 'lib', 'index.js'), 'utf8');
   const worldViewSource = readFileSync(join(prismarineRoot, 'viewer', 'lib', 'worldView.js'), 'utf8');
+  const entityRendererSource = readFileSync(join(prismarineRoot, 'viewer', 'lib', 'entities.js'), 'utf8');
   const villagerModels = JSON.parse(readFileSync(join(prismarineRoot, 'viewer', 'lib', 'entity', 'entities.json'), 'utf8'));
   const browserBundle = readFileSync(join(prismarineRoot, 'public', 'index.js'), 'utf8');
 
@@ -83,6 +84,11 @@ test('renders scripted village dialogue actors with the native villager model in
   assert.doesNotMatch(browserBundle, /new THREE\.OrbitControls/);
   assert.match(worldViewSource, /\['Anna', 'James', 'Thomas'\]\.includes\(e\.username\) \? 'villager' : e\.name/);
   assert.equal((worldViewSource.match(/name: \['Anna', 'James', 'Thomas'\]\.includes\(e\.username\) \? 'villager' : e\.name/g) ?? []).length, 2);
+  assert.match(entityRendererSource, /if \(\['Anna', 'James', 'Thomas'\]\.includes\(entity\.username\)\)/);
+  assert.match(entityRendererSource, /const text = entity\.username/);
+  assert.match(entityRendererSource, /sprite\.scale\.set\(\(canvas\.width \/ canvas\.height\) \* 0\.3, 0\.3, 1\)/);
+  assert.match(entityRendererSource, /ctx\.fillStyle = '#ffffff'/);
+  assert.doesNotMatch(entityRendererSource, /createCanvas\(500, 100\)/);
   assert.equal(villagerModels.villager.textures.default, 'textures/entity/villager/villager');
   assert.ok(browserBundle.includes('"default":"textures/entity/villager/villager"'));
 });

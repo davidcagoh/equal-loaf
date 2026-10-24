@@ -108,4 +108,46 @@ function normalizeVillagerTextureSource(source) {
   )
 }
 
-module.exports = { normalizeIndexSource, normalizeVillagerTextureSource }
+function normalizeEntityNameplateSource(source) {
+  const startMarker = '      if (entity.username !== undefined) {'
+  const endMarker = '        e.mesh.add(sprite)\n      }'
+  const residentMarker = "      if (['Anna', 'James', 'Thomas'].includes(entity.username)) {"
+  const completeMarker = `${residentMarker}\n        const canvas = createCanvas(1, 128)`
+  if (source.includes(completeMarker)) return source
+
+  const start = source.indexOf(startMarker)
+  const end = source.indexOf(endMarker, start)
+  if (start < 0 || end < 0) throw new Error('Could not find expected Prismarine Viewer entity nameplate code')
+  const endOffset = end + endMarker.length
+  const replacement = `${residentMarker}
+        const canvas = createCanvas(1, 128)
+        const ctx = canvas.getContext('2d')
+        ctx.font = 'bold 84px Arial'
+        const text = entity.username
+        canvas.width = Math.ceil(ctx.measureText(text).width + 48)
+
+        ctx.fillStyle = 'rgba(15, 23, 42, 0.82)'
+        ctx.fillRect(0, 0, canvas.width, canvas.height)
+        ctx.font = 'bold 84px Arial'
+        ctx.textAlign = 'center'
+        ctx.textBaseline = 'middle'
+        ctx.lineJoin = 'round'
+        ctx.lineWidth = 8
+        ctx.strokeStyle = 'rgba(15, 23, 42, 0.95)'
+        ctx.strokeText(text, canvas.width / 2, canvas.height / 2)
+        ctx.fillStyle = '#ffffff'
+        ctx.fillText(text, canvas.width / 2, canvas.height / 2)
+
+        const tex = new THREE.Texture(canvas)
+        tex.needsUpdate = true
+        const spriteMat = new THREE.SpriteMaterial({ map: tex, transparent: true, depthWrite: false })
+        const sprite = new THREE.Sprite(spriteMat)
+        sprite.scale.set((canvas.width / canvas.height) * 0.3, 0.3, 1)
+        sprite.position.y += entity.height + 0.35
+
+        e.mesh.add(sprite)
+      }`
+  return source.slice(0, start) + replacement + source.slice(endOffset)
+}
+
+module.exports = { normalizeIndexSource, normalizeVillagerTextureSource, normalizeEntityNameplateSource }
