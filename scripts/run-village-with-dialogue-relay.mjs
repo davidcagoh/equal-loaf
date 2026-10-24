@@ -28,18 +28,32 @@ function bridgeError(status) {
   return { version: 1, type: 'ptt.bridge.ack', status };
 }
 
-function pttError(command, status) {
-  if (!command || !['ptt.begin', 'ptt.complete', 'ptt.cancel'].includes(command.type)
-    || typeof command.turnId !== 'string') return bridgeError(status);
-  const phase = command.type === 'ptt.begin' ? 'begin' : command.type === 'ptt.cancel' ? 'cancel' : 'complete';
-  return { version: 1, type: 'ptt.ack', phase, turnId: command.turnId, status };
+function pttAckDescriptor(command, status) {
+  if (!command || typeof command.turnId !== 'string') return bridgeError(status);
+  if (command.type === 'ptt.begin' || command.type === 'ptt.native.begin' || command.type === 'ptt.complete' || command.type === 'ptt.cancel') {
+    const phase = command.type === 'ptt.begin' || command.type === 'ptt.native.begin' ? 'begin' : command.type === 'ptt.cancel' ? 'cancel' : 'complete';
+    return { version: 1, type: 'ptt.ack', phase, turnId: command.turnId, status };
+  }
+  const ackType = command.type === 'ptt.session.bind' ? 'ptt.session.ack'
+    : command.type === 'ptt.speech.start' || command.type === 'ptt.speech.finish' ? 'ptt.speech.ack'
+      : command.type === 'ptt.native.end' ? 'ptt.native.ack' : null;
+  if (!ackType) return bridgeError(status);
+  return {
+    version: 1, type: ackType, turnId: command.turnId, status,
+    ...(command.responseId ? { responseId: command.responseId } : {}),
+    ...(command.itemId ? { itemId: command.itemId } : {}),
+  };
 }
 
-function ackKey(phase, turnId) { return `${phase}:${turnId}`; }
+function ackKey(type, phase, turnId, responseId, itemId) {
+  return `${type}:${phase ?? ''}:${turnId}:${responseId ?? ''}:${itemId ?? ''}`;
+}
 
 function deliverAck(event) {
-  if (event?.type !== 'ptt.ack' || typeof event.phase !== 'string' || typeof event.turnId !== 'string') return false;
-  const key = ackKey(event.phase, event.turnId);
+  if (!event || !['ptt.ack', 'ptt.session.ack', 'ptt.speech.ack', 'ptt.native.ack'].includes(event.type)
+    || typeof event.turnId !== 'string') return false;
+  const phase = event.type === 'ptt.ack' ? event.phase : undefined;
+  const key = ackKey(event.type, phase, event.turnId, event.responseId, event.itemId);
   const pending = pendingAcks.get(key);
   if (!pending) return true;
   clearTimeout(pending.timer);
@@ -52,23 +66,23 @@ function handleIpcLine(socket, line) {
   let command;
   try { command = JSON.parse(line); } catch { socket.end(`${JSON.stringify(bridgeError('invalid_json'))}\n`); return; }
   if (Buffer.byteLength(line, 'utf8') > MAX_PTT_COMMAND_BYTES || !isVillagePttCommand(command)) {
-    socket.end(`${JSON.stringify(pttError(command, 'rejected'))}\n`);
+    socket.end(`${JSON.stringify(pttAckDescriptor(command, 'rejected'))}\n`);
     return;
   }
   if (!village.stdin?.writable || stopping) {
-    socket.end(`${JSON.stringify(pttError(command, 'unavailable'))}\n`);
+    socket.end(`${JSON.stringify(pttAckDescriptor(command, 'unavailable'))}\n`);
     return;
   }
 
-  const phase = command.type === 'ptt.begin' ? 'begin' : command.type === 'ptt.cancel' ? 'cancel' : 'complete';
-  const key = ackKey(phase, command.turnId);
+  const errorAck = pttAckDescriptor(command, 'unavailable');
+  const key = ackKey(errorAck.type, errorAck.phase, command.turnId, errorAck.responseId, errorAck.itemId);
   if (pendingAcks.has(key)) {
-    socket.end(`${JSON.stringify(pttError(command, 'duplicate'))}\n`);
+    socket.end(`${JSON.stringify(pttAckDescriptor(command, 'duplicate'))}\n`);
     return;
   }
   const timer = setTimeout(() => {
     pendingAcks.delete(key);
-    socket.end(`${JSON.stringify(pttError(command, 'expired'))}\n`);
+    socket.end(`${JSON.stringify(pttAckDescriptor(command, 'expired'))}\n`);
   }, 8_000);
   pendingAcks.set(key, { socket, timer });
   const body = `${JSON.stringify(command)}\n`;
@@ -76,7 +90,7 @@ function handleIpcLine(socket, line) {
     if (!error) return;
     clearTimeout(timer);
     pendingAcks.delete(key);
-    socket.end(`${JSON.stringify(pttError(command, 'unavailable'))}\n`);
+    socket.end(`${JSON.stringify(pttAckDescriptor(command, 'unavailable'))}\n`);
   });
 }
 
@@ -133,6 +147,19 @@ async function relayDialogue(event) {
   }
 }
 
+async function relayResidentPositions(event) {
+  try {
+    await fetch(`http://127.0.0.1:${viewerPort}/boson-residents`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify(event),
+      signal: AbortSignal.timeout(1_000),
+    });
+  } catch {
+    // Position refresh is transient; the viewer will receive the next snapshot.
+  }
+}
+
 async function stop(signal = 'SIGTERM') {
   if (stopping) return;
   stopping = true;
@@ -181,6 +208,10 @@ for await (const line of lines) {
     continue;
   }
   if (deliverAck(event)) continue;
+  if (event?.type === 'village.residents') {
+    void relayResidentPositions(event);
+    continue;
+  }
   if (event?.type !== 'village.dialogue') {
     process.stdout.write('Village simulator emitted a non-dialogue event.\n');
     continue;

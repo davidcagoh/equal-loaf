@@ -3,6 +3,7 @@ import { once } from 'node:events';
 import { Server, type IncomingMessage, type ServerResponse } from 'node:http';
 import { readFileSync } from 'node:fs';
 import { isVillageDialogue } from './viewer-audio.js';
+import { isVillageResidentPositionsEvent, type VillageResidentPositionsEvent } from './village-event.ts';
 import { createPttServer, isSameOriginPttRequest } from './viewer-ptt-server.ts';
 import { createHiggsTtsHandler, RESIDENT_VOICES } from './audio/higgs-tts.js';
 import type { Duplex } from 'node:stream';
@@ -109,6 +110,8 @@ function restrictViewerRequests(server: Server, port: number, pttServer: ReturnT
   const framePolicy = "frame-ancestors http://127.0.0.1:8000 http://localhost:8000";
   const originalEmit = server.emit;
   const dialogueClients = new Set<ServerResponse>();
+  const residentClients = new Set<ServerResponse>();
+  let latestResidentPositions: VillageResidentPositionsEvent | null = null;
   const viewerClients = new Set<Duplex>();
   const viewerIndex = readFileSync(require.resolve('prismarine-viewer/public/index.html'), 'utf8');
   const viewerPage = viewerIndex.replace('</body>', '<script src="/socket.io/socket.io.js"></script><script type="module" src="/boson-controls.js"></script><script type="module" src="/boson-audio.js"></script><script type="module" src="/boson-ptt.js"></script></body>');
@@ -152,6 +155,52 @@ function restrictViewerRequests(server: Server, port: number, pttServer: ReturnT
     return true;
   };
 
+  const routeResidentPositions = (request: IncomingMessage, response: ServerResponse): boolean => {
+    if (request.url?.split('?')[0] !== '/boson-residents') return false;
+    if (request.method === 'GET') {
+      const origin = request.headers.origin;
+      const allowedHosts = new Set([...viewerOrigins].map((value) => new URL(value).host));
+      if ((origin && !viewerOrigins.has(origin)) || request.headers['sec-fetch-site'] !== 'same-origin'
+        || typeof request.headers.host !== 'string' || !allowedHosts.has(request.headers.host)) {
+        response.writeHead(403).end('Same-origin viewer request required.');
+        return true;
+      }
+      response.writeHead(200, { 'Content-Type': 'text/event-stream', 'Cache-Control': 'no-cache', Connection: 'keep-alive' });
+      response.write(': connected\n\n');
+      residentClients.add(response);
+      response.once('close', () => residentClients.delete(response));
+      if (latestResidentPositions) response.write(`event: residents\ndata: ${JSON.stringify(latestResidentPositions)}\n\n`);
+      return true;
+    }
+    if (request.method !== 'POST') {
+      response.writeHead(405, { Allow: 'GET, POST' }).end();
+      return true;
+    }
+    const chunks: Buffer[] = [];
+    let size = 0;
+    request.on('data', (chunk: Buffer) => {
+      size += chunk.length;
+      if (size > 4_096) request.destroy();
+      else chunks.push(chunk);
+    });
+    request.on('end', () => {
+      try {
+        const event: unknown = JSON.parse(Buffer.concat(chunks).toString('utf8'));
+        if (!isVillageResidentPositionsEvent(event)) {
+          response.writeHead(400).end('Invalid resident positions event.');
+          return;
+        }
+        latestResidentPositions = event;
+        const data = `event: residents\ndata: ${JSON.stringify(event)}\n\n`;
+        for (const client of residentClients) client.write(data);
+        response.writeHead(202).end();
+      } catch {
+        response.writeHead(400).end('Invalid JSON resident positions event.');
+      }
+    });
+    return true;
+  };
+
   const allowed = (request: IncomingMessage, socketHandshake = false): boolean => {
     const host = request.headers.host;
     const origin = request.headers.origin;
@@ -176,6 +225,7 @@ function restrictViewerRequests(server: Server, port: number, pttServer: ReturnT
         return true;
       }
       if (routeDialogue(request, response)) return true;
+      if (routeResidentPositions(request, response)) return true;
       if (request.url?.split('?')[0] === '/boson-tts') {
         if (!isSameOriginPttRequest(request, viewerOrigins)) {
           response.writeHead(403).end('Same-origin viewer request required.');

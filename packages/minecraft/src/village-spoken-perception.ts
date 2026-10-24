@@ -1,6 +1,6 @@
 import { distance3D, RESIDENT_HEARING_RADIUS, type Position3D } from './village-encounters.ts';
 
-const MAX_TRANSCRIPT_BYTES = 4_096;
+const MAX_TRANSCRIPT_BYTES = 1_000;
 const MAX_CONSUMED_RESPONSE_IDS = 512;
 const SAFE_PROVIDER_ID = /^[A-Za-z0-9_.:-]{1,160}$/;
 
@@ -31,20 +31,24 @@ export interface TransientResidentSpeechPerception {
  */
 export function projectCompletedResidentSpeech(input: {
   /** Resolved from server-owned active-session state, not from a browser event. */
-  session: { sessionId: string; speakerId: string; responseId: string };
+  session: { turnId: string; sessionId: string; speakerId: string; responseId: string; itemId: string };
   playbackReport: {
+    turnId: string;
     sessionId: string;
     responseId: string;
-    transcript: string;
+    itemId: string;
     playback: 'completed' | 'interrupted';
+    transcript?: string;
   };
   samples: readonly NativeSpeechPositionSample[];
   consumedResponseIds: Set<string>;
 }): TransientResidentSpeechPerception | null {
   const { session, playbackReport } = input;
-  if (playbackReport.sessionId !== session.sessionId || playbackReport.responseId !== session.responseId) return null;
-  const responseKey = `${session.sessionId}:${session.responseId}`;
-  if (!SAFE_PROVIDER_ID.test(session.sessionId) || !SAFE_PROVIDER_ID.test(session.responseId)
+  if (playbackReport.turnId !== session.turnId || playbackReport.sessionId !== session.sessionId
+    || playbackReport.responseId !== session.responseId || playbackReport.itemId !== session.itemId) return null;
+  const responseKey = `${session.sessionId}:${session.turnId}:${session.responseId}:${session.itemId}`;
+  if (!SAFE_PROVIDER_ID.test(session.turnId) || !SAFE_PROVIDER_ID.test(session.sessionId)
+    || !SAFE_PROVIDER_ID.test(session.responseId) || !SAFE_PROVIDER_ID.test(session.itemId)
     || !SAFE_PROVIDER_ID.test(session.speakerId) || input.consumedResponseIds.has(responseKey)) return null;
   if (input.consumedResponseIds.size >= MAX_CONSUMED_RESPONSE_IDS) {
     const oldest = input.consumedResponseIds.values().next().value as string | undefined;
@@ -52,9 +56,9 @@ export function projectCompletedResidentSpeech(input: {
   }
   input.consumedResponseIds.add(responseKey);
 
-  if (playbackReport.playback !== 'completed' || typeof playbackReport.transcript !== 'string'
-    || !playbackReport.transcript.trim() || new TextEncoder().encode(playbackReport.transcript).byteLength > MAX_TRANSCRIPT_BYTES
-    || input.samples.length < 2) return null;
+  if (playbackReport.playback !== 'completed') return null;
+  if (typeof playbackReport.transcript !== 'string' || !playbackReport.transcript.trim()
+    || new TextEncoder().encode(playbackReport.transcript).byteLength > MAX_TRANSCRIPT_BYTES || input.samples.length < 2) return null;
 
   const samples = [...input.samples].sort((left, right) => left.tick - right.tick);
   if (!samples.every((sample, index) => Number.isSafeInteger(sample.tick) && sample.tick >= 0

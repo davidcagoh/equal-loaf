@@ -26,7 +26,7 @@ import {
   type VillagePttCommand,
   type VillageDialogueEvent,
 } from './village-event.ts';
-import { villageDialogue, villageMysteryDialogue, villageProfiles } from './village-profiles.ts';
+import { RESIDENT_DISPLAY_NAMES, villageDialogue, villageMysteryDialogue, villageProfiles } from './village-profiles.ts';
 import { createAmbientUtteranceObservation, nextResidentDialogueTurn, type ResidentDialogueCursor } from './village-dialogue-scheduler.ts';
 import { createRoutineWorldObservation } from './village-observations.ts';
 import { distance3d, isWithinExplorerWatchRange, shouldPauseForExplorer, VillageAi } from './village-ai.ts';
@@ -40,6 +40,9 @@ import {
 } from './village-encounters.ts';
 import { createEqualLoafState } from './village-short-scene.ts';
 import { completeEqualLoafPttTurn } from './village-ptt-scene-integration.ts';
+import { projectCompletedResidentSpeech, type NativeSpeechPositionSample } from './village-spoken-perception.ts';
+import { VillageHeardSpeechMemory } from './village-heard-speech-memory.ts';
+import { equalLoafResidentFact } from './native-resident-context.ts';
 
 // Optional explicit env file keeps credentials in the local launcher process only.
 if (process.env.BOSON_AI_ENV_FILE) process.loadEnvFile(process.env.BOSON_AI_ENV_FILE);
@@ -61,13 +64,39 @@ const spawned = new Set<string>();
 const homePositions = new Map<string, { x: number; y: number; z: number }>();
 const lastWatchTurnAt = new Map<string, number>();
 const awarenessTimers: ReturnType<typeof setInterval>[] = [];
-const activePttTurns = new Map<string, { residentId: string; startedAt: number; expiresAt: number; beginAck: VillagePttAck }>();
+interface ActivePttTurn {
+  residentId: string;
+  residentSessionId?: string;
+  startedAt: number;
+  expiresAt: number;
+  beginAck: VillagePttAck;
+}
+interface ActiveNativeSpeech {
+  turnId: string;
+  residentId: string;
+  residentSessionId: string;
+  responseId: string;
+  itemId: string;
+  samples: NativeSpeechPositionSample[];
+  timer: ReturnType<typeof setInterval>;
+  samplingComplete: boolean;
+}
+const activePttTurns = new Map<string, ActivePttTurn>();
 const resolvedPttTurns = new Map<string, 'cancelled' | 'completed' | 'expired'>();
+const activeNativeSpeech = new Map<string, ActiveNativeSpeech>();
+const consumedNativeSpeechResponseIds = new Map<string, Set<string>>();
+const heardSpeechMemory = new VillageHeardSpeechMemory(3, 180_000);
+const heardSpeechMemoryPruner = setInterval(() => heardSpeechMemory.prune(), 1_000);
+heardSpeechMemoryPruner.unref();
 const cognitionState = { current: createVillageCognitionState() };
 let equalLoafSceneState = createEqualLoafState();
 const RESIDENT_HEARING_RADIUS = 12;
 const PTT_TURN_TTL_MS = 30_000;
+const NATIVE_PTT_TURN_TTL_MS = 120_000;
 const MAX_ACTIVE_PTT_TURNS = 8;
+const MAX_ACTIVE_NATIVE_SPEECH = 8;
+const MAX_NATIVE_SPEECH_SAMPLES = 500;
+const NATIVE_SPEECH_SAMPLE_INTERVAL_MS = 250;
 const ai = new VillageAi({ enabled: process.env.BOSON_VILLAGE_AI === '1', jevKey: process.env.TYPESAFE_API_KEY, gatewayKey: process.env.AI_GATEWAY_API_KEY });
 const plannedLineIds = new Map<string, string>();
 let dialogueSequence = 0;
@@ -129,6 +158,10 @@ function currentEncounterResidents(): EncounterResident[] {
   });
 }
 
+function recentHeardSpeech(residentId: string, now = Date.now()): VillagePttBeginContext['recentHeardSpeech'] {
+  return heardSpeechMemory.recent(residentId, now);
+}
+
 function freshPttBeginContext(residentId: string, locationId: string): VillagePttBeginContext | null {
   const profile = villageProfiles.find(({ id }) => id === residentId);
   const state = cognitionState.current;
@@ -136,7 +169,7 @@ function freshPttBeginContext(residentId: string, locationId: string): VillagePt
   const knowledge = getResidentKnowledgeContext(state, residentId, {
     residentId, playerIntent: 'greet', topic: 'general', locationId, tick: Date.now(),
   });
-  if (knowledge.responseOptions.length === 0) return null;
+  const sceneFact = equalLoafResidentFact(residentId);
   return {
     id: profile.id,
     name: profile.username,
@@ -144,9 +177,10 @@ function freshPttBeginContext(residentId: string, locationId: string): VillagePt
     goal: knowledge.goal,
     locationId,
     topics: knowledge.topics,
-    facts: knowledge.facts,
+    facts: sceneFact ? [...knowledge.facts, sceneFact] : knowledge.facts,
     responseOptions: knowledge.responseOptions,
     relationship: knowledge.relationship,
+    recentHeardSpeech: recentHeardSpeech(residentId),
   };
 }
 
@@ -154,9 +188,173 @@ function sendPttAck(ack: VillagePttAck): void {
   process.stdout.write(`${JSON.stringify(ack)}\n`);
 }
 
+function sendNativeAck(
+  type: string,
+  turnId: string,
+  status: string,
+  correlation?: { responseId?: string; itemId?: string; recipientCount?: number },
+): void {
+  process.stdout.write(`${JSON.stringify({
+    version: 1, type, turnId, status,
+    ...(correlation?.responseId ? { responseId: correlation.responseId } : {}),
+    ...(correlation?.itemId ? { itemId: correlation.itemId } : {}),
+    ...(correlation?.recipientCount === undefined ? {} : { recipientCount: correlation.recipientCount }),
+  })}\n`);
+}
+
+function nativeSpeechKey(turnId: string, responseId: string, itemId: string): string {
+  return `${turnId}:${responseId}:${itemId}`;
+}
+
+function sampleNativeSpeech(speech: ActiveNativeSpeech): NativeSpeechPositionSample | null {
+  const speaker = bots.get(speech.residentId)?.entity?.position;
+  if (!speaker) return null;
+  const residents = currentEncounterResidents();
+  process.stdout.write(`${JSON.stringify({
+    type: 'village.residents', timestamp: Date.now(),
+    residents: residents.map(({ residentId, name, position }) => ({ residentId, name, position })),
+  })}\n`);
+  return {
+    tick: Date.now(),
+    speakerPosition: { x: speaker.x, y: speaker.y, z: speaker.z },
+    residents: residents.map(({ residentId, position }) => ({ residentId, position })),
+  };
+}
+
+function stopNativeSpeechForTurn(turnId: string): void {
+  for (const [key, speech] of activeNativeSpeech) {
+    if (speech.turnId !== turnId) continue;
+    clearInterval(speech.timer);
+    activeNativeSpeech.delete(key);
+  }
+}
+
+function bindResidentSession(command: Extract<VillagePttCommand, { type: 'ptt.session.bind' }>): void {
+  prunePttTurns();
+  const turn = activePttTurns.get(command.turnId);
+  if (!turn) {
+    sendNativeAck('ptt.session.ack', command.turnId, 'expired');
+    return;
+  }
+  if (turn.residentSessionId) {
+    sendNativeAck('ptt.session.ack', command.turnId, turn.residentSessionId === command.residentSessionId ? 'bound' : 'mismatch');
+    return;
+  }
+  turn.residentSessionId = command.residentSessionId;
+  turn.expiresAt = Math.min(turn.startedAt + NATIVE_PTT_TURN_TTL_MS, Date.now() + NATIVE_PTT_TURN_TTL_MS);
+  sendNativeAck('ptt.session.ack', command.turnId, 'bound');
+}
+
+function startNativeSpeech(command: Extract<VillagePttCommand, { type: 'ptt.speech.start' }>): void {
+  prunePttTurns();
+  const turn = activePttTurns.get(command.turnId);
+  if (!turn || turn.residentSessionId !== command.residentSessionId) {
+    sendNativeAck('ptt.speech.ack', command.turnId, 'no_session', { responseId: command.responseId, itemId: command.itemId });
+    return;
+  }
+  const key = nativeSpeechKey(command.turnId, command.responseId, command.itemId);
+  if (activeNativeSpeech.has(key)) {
+    sendNativeAck('ptt.speech.ack', command.turnId, 'duplicate', { responseId: command.responseId, itemId: command.itemId });
+    return;
+  }
+  if (activeNativeSpeech.size >= MAX_ACTIVE_NATIVE_SPEECH) {
+    sendNativeAck('ptt.speech.ack', command.turnId, 'unavailable', { responseId: command.responseId, itemId: command.itemId });
+    return;
+  }
+  const speech: ActiveNativeSpeech = {
+    turnId: command.turnId,
+    residentId: turn.residentId,
+    residentSessionId: command.residentSessionId,
+    responseId: command.responseId,
+    itemId: command.itemId,
+    samples: [],
+    timer: setInterval(() => {
+      const sample = sampleNativeSpeech(speech);
+      if (!sample || speech.samples.length >= MAX_NATIVE_SPEECH_SAMPLES) {
+        speech.samplingComplete = false;
+        clearInterval(speech.timer);
+        return;
+      }
+      speech.samples.push(sample);
+    }, NATIVE_SPEECH_SAMPLE_INTERVAL_MS),
+    samplingComplete: true,
+  };
+  const firstSample = sampleNativeSpeech(speech);
+  if (!firstSample) {
+    clearInterval(speech.timer);
+    sendNativeAck('ptt.speech.ack', command.turnId, 'unavailable', { responseId: command.responseId, itemId: command.itemId });
+    return;
+  }
+  speech.samples.push(firstSample);
+  activeNativeSpeech.set(key, speech);
+  sendNativeAck('ptt.speech.ack', command.turnId, 'started', { responseId: command.responseId, itemId: command.itemId });
+}
+
+function rememberHeardSpeech(event: NonNullable<ReturnType<typeof projectCompletedResidentSpeech>>): number {
+  const speakerName = RESIDENT_DISPLAY_NAMES[event.speakerId as keyof typeof RESIDENT_DISPLAY_NAMES];
+  if (!speakerName) return 0;
+  return heardSpeechMemory.remember(event, speakerName);
+}
+
+function finishNativeSpeech(command: Extract<VillagePttCommand, { type: 'ptt.speech.finish' }>): void {
+  prunePttTurns();
+  const turn = activePttTurns.get(command.turnId);
+  const key = nativeSpeechKey(command.turnId, command.responseId, command.itemId);
+  const speech = activeNativeSpeech.get(key);
+  if (!turn || turn.residentSessionId !== command.residentSessionId || !speech
+    || speech.residentSessionId !== command.residentSessionId) {
+    sendNativeAck('ptt.speech.ack', command.turnId, 'no_session', { responseId: command.responseId, itemId: command.itemId });
+    return;
+  }
+  clearInterval(speech.timer);
+  const finalSample = sampleNativeSpeech(speech);
+  if (finalSample && speech.samples.length < MAX_NATIVE_SPEECH_SAMPLES) speech.samples.push(finalSample);
+  else speech.samplingComplete = false;
+  activeNativeSpeech.delete(key);
+
+  const consumedResponseIds = consumedNativeSpeechResponseIds.get(command.residentSessionId) ?? new Set<string>();
+  consumedNativeSpeechResponseIds.set(command.residentSessionId, consumedResponseIds);
+  const event = projectCompletedResidentSpeech({
+    session: {
+      turnId: command.turnId,
+      sessionId: command.residentSessionId,
+      speakerId: turn.residentId,
+      responseId: command.responseId,
+      itemId: command.itemId,
+    },
+    playbackReport: {
+      turnId: command.turnId,
+      sessionId: command.residentSessionId,
+      responseId: command.responseId,
+      itemId: command.itemId,
+      playback: command.playback,
+      ...(command.transcript ? { transcript: command.transcript } : {}),
+    },
+    samples: speech.samplingComplete ? speech.samples : [],
+    consumedResponseIds,
+  });
+  const recipientCount = event ? rememberHeardSpeech(event) : 0;
+  sendNativeAck('ptt.speech.ack', command.turnId, 'finished', {
+    responseId: command.responseId, itemId: command.itemId, recipientCount,
+  });
+}
+
+function endNativeTurn(command: Extract<VillagePttCommand, { type: 'ptt.native.end' }>): void {
+  const turn = activePttTurns.get(command.turnId);
+  if (!turn || turn.residentSessionId !== command.residentSessionId) {
+    sendNativeAck('ptt.native.ack', command.turnId, 'no_session');
+    return;
+  }
+  stopNativeSpeechForTurn(command.turnId);
+  activePttTurns.delete(command.turnId);
+  resolvedPttTurns.set(command.turnId, 'completed');
+  sendNativeAck('ptt.native.ack', command.turnId, 'ended');
+}
+
 function prunePttTurns(now = Date.now()): void {
   for (const [turnId, turn] of activePttTurns) {
     if (now > turn.expiresAt) {
+      stopNativeSpeechForTurn(turnId);
       activePttTurns.delete(turnId);
       resolvedPttTurns.set(turnId, 'expired');
     }
@@ -168,7 +366,7 @@ function prunePttTurns(now = Date.now()): void {
   }
 }
 
-function beginPttTurn(command: Extract<VillagePttCommand, { type: 'ptt.begin' }>): void {
+function beginPttTurn(command: Extract<VillagePttCommand, { type: 'ptt.begin' | 'ptt.native.begin' }>): void {
   prunePttTurns();
   const existing = activePttTurns.get(command.turnId);
   if (existing) {
@@ -189,9 +387,10 @@ function beginPttTurn(command: Extract<VillagePttCommand, { type: 'ptt.begin' }>
   const canRespond = ({ residentId, locationId }: EncounterResident): boolean => Boolean(selectResidentIntent(cognitionState.current, {
     residentId, playerIntent: 'greet', topic: 'general', locationId, tick: now,
   }, now >>> 0));
-  const nearest = explorer ? selectPttResident(explorer, residents, canRespond) : undefined;
+  const isNative = command.type === 'ptt.native.begin';
+  const nearest = explorer ? selectPttResident(explorer, residents, isNative ? () => true : canRespond) : undefined;
   if (!nearest) {
-    const guidance = explorer ? createNoResidentGuidance(explorer, residents, canRespond)
+    const guidance = explorer ? createNoResidentGuidance(explorer, residents, isNative ? () => true : canRespond)
       : 'No resident is available yet. Wait for the village to load, then approach a resident within 8 blocks.';
     sendPttAck({ version: 1, type: 'ptt.ack', phase: 'begin', turnId: command.turnId, status: 'no_resident', guidance });
     return;
@@ -418,21 +617,31 @@ function cancelPttTurn(command: Extract<VillagePttCommand, { type: 'ptt.cancel' 
     sendPttAck({ version: 1, type: 'ptt.ack', phase: 'cancel', turnId: command.turnId, status: 'no_session' });
     return;
   }
+  stopNativeSpeechForTurn(command.turnId);
   activePttTurns.delete(command.turnId);
   resolvedPttTurns.set(command.turnId, 'cancelled');
   sendPttAck({ version: 1, type: 'ptt.ack', phase: 'cancel', turnId: command.turnId, status: 'cancelled' });
 }
 
 function handlePttCommand(command: VillagePttCommand): void {
-  if (command.type === 'ptt.begin') beginPttTurn(command);
+  if (command.type === 'ptt.begin' || command.type === 'ptt.native.begin') beginPttTurn(command);
   else if (command.type === 'ptt.complete') completePttTurn(command);
-  else cancelPttTurn(command);
+  else if (command.type === 'ptt.cancel') cancelPttTurn(command);
+  else if (command.type === 'ptt.session.bind') bindResidentSession(command);
+  else if (command.type === 'ptt.speech.start') startNativeSpeech(command);
+  else if (command.type === 'ptt.speech.finish') finishNativeSpeech(command);
+  else endNativeTurn(command);
 }
 
 function stop(): void {
   if (stopping) return;
   stopping = true;
   activePttTurns.clear();
+  for (const speech of activeNativeSpeech.values()) clearInterval(speech.timer);
+  activeNativeSpeech.clear();
+  consumedNativeSpeechResponseIds.clear();
+  heardSpeechMemory.clear();
+  clearInterval(heardSpeechMemoryPruner);
   for (const timer of awarenessTimers) clearInterval(timer);
   for (const bot of bots.values()) {
     bot.pathfinder.setGoal(null);
@@ -453,10 +662,13 @@ pttInput.on('line', (line) => {
   try {
     handlePttCommand(command);
   } catch {
-    const phase = command.type === 'ptt.begin' ? 'begin' : command.type === 'ptt.cancel' ? 'cancel' : 'complete';
-    if (phase === 'begin') sendPttAck({ version: 1, type: 'ptt.ack', phase, turnId: command.turnId, status: 'unavailable' });
-    else if (phase === 'cancel') sendPttAck({ version: 1, type: 'ptt.ack', phase, turnId: command.turnId, status: 'unavailable' });
-    else sendPttAck({ version: 1, type: 'ptt.ack', phase, turnId: command.turnId, status: 'unavailable' });
+    if (command.type === 'ptt.session.bind') sendNativeAck('ptt.session.ack', command.turnId, 'unavailable');
+    else if (command.type === 'ptt.speech.start' || command.type === 'ptt.speech.finish') sendNativeAck('ptt.speech.ack', command.turnId, 'unavailable');
+    else if (command.type === 'ptt.native.end') sendNativeAck('ptt.native.ack', command.turnId, 'unavailable');
+    else {
+      const phase = command.type === 'ptt.begin' || command.type === 'ptt.native.begin' ? 'begin' : command.type === 'ptt.cancel' ? 'cancel' : 'complete';
+      sendPttAck({ version: 1, type: 'ptt.ack', phase, turnId: command.turnId, status: 'unavailable' });
+    }
   }
 });
 pttInput.on('error', () => undefined);

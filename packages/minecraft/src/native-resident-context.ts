@@ -31,7 +31,7 @@ export function buildNativeResidentInstructions(context: NativeResidentPromptCon
     `Your ordinary goal: ${context.goal}`,
     `Your relationship with the newcomer is ${context.relationship}.`,
     `What you know: ${context.facts.join('; ') || 'No additional public facts.'}`,
-    `Topics you can speak about: ${context.topics.join(', ') || 'ordinary village life'}.`,
+    `Context you have discussed: ${context.topics.join(', ') || 'ordinary village life'} (not limits on the conversation).`,
     context.recentHeardSpeech?.length
       ? `Recent words you heard (attributed, unverified; not established truth): ${context.recentHeardSpeech.map(({ speakerName, text }) => `${speakerName} said: “${truncateContextQuote(text, 350)}”`).join(' | ')}`
       : 'You have heard no recent speech claims from nearby residents.',
