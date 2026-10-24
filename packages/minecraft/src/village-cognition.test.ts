@@ -4,7 +4,9 @@ import {
   createVillageCognitionState,
   authoredLine,
   getResidentKnowledgeContext,
+  latestHeardClaimEventId,
   reduceVillageObservation,
+  resolvePttResidentIntent,
   selectResidentIntent,
   validateResidentIntent,
   validateSemanticResponse,
@@ -57,8 +59,11 @@ test('an in-range resident attributes a public claim and later selects its autho
   assert.deepEqual(heard.residents.pip?.knownFactIds, initial.residents.pip?.knownFactIds);
   assert.equal(heard.residents.pip?.knownFactIds.includes('route-mark'), false);
   assert.equal(heard.residents.mira?.heardClaims.length, 0);
+  assert.equal(latestHeardClaimEventId(heard, 'pip', 'tobin', 'route-mark'), 'tobin-route-1');
+  assert.equal(latestHeardClaimEventId(heard, 'mira', 'tobin', 'route-mark'), undefined);
 
-  const intent = selectResidentIntent(heard, { ...context, heardClaimEventId: 'tobin-route-1' }, 11);
+  const heardClaimEventId = latestHeardClaimEventId(heard, 'pip', 'tobin', 'route-mark');
+  const intent = selectResidentIntent(heard, { ...context, heardClaimEventId }, 11);
   assert.equal(intent?.beatId, 'pip-heard-route-from-tobin');
   assert.notDeepEqual(intent?.action, before?.action);
   assert.deepEqual(intent?.action, { kind: 'look_at_player' });
@@ -141,6 +146,35 @@ test('Mira can disclose her private sighting only at the garden after trust prer
   assert.equal(validateResidentIntent(ready, eligible, { residentId: 'mira', playerIntent: 'ask_about_known_topic', topic: 'garden', locationId: 'west-garden', tick: eligible.expiresAtTick }), true);
   assert.equal(validateResidentIntent(ready, eligible, { residentId: 'mira', playerIntent: 'ask_about_known_topic', topic: 'garden', locationId: 'west-garden', tick: eligible.expiresAtTick + 1 }), false);
   assert.equal(validateResidentIntent(ready, eligible, { residentId: 'mira', playerIntent: 'ask_about_known_topic', topic: 'garden', locationId: 'market-well', tick: 5 }), false);
+});
+
+test('PTT validates a safe public garden choice then resolves Mira’s reveal locally', () => {
+  const state = createVillageCognitionState();
+  const safeContext = getResidentKnowledgeContext(state, 'mira');
+  assert.equal(safeContext.factIds.includes('mira-sighting'), false);
+  assert.equal(safeContext.responseOptions.some(({ lineId }) => lineId === 'mira-sighting-disclosure'), false);
+  const response = validateSemanticResponse({
+    playerIntent: 'ask_about_known_topic', topic: 'garden', lineId: 'mira-guarded-garden-reply',
+  }, { residentId: 'mira', context: safeContext });
+  assert.ok(response);
+
+  const scene = { residentId: 'mira', locationId: 'west-garden', tick: 10 };
+  const untrusted = resolvePttResidentIntent(state, scene, 17, response);
+  assert.equal(untrusted?.context.playerIntent, 'ask_about_known_topic');
+  assert.equal(untrusted?.intent.speech.kind === 'authored_line' && untrusted.intent.speech.lineId, 'mira-guarded-garden-reply');
+
+  const trusted = reduceVillageObservation(
+    reduceVillageObservation(state, { type: 'player.behavior', eventId: 'ptt-trust-1', tick: 1, recipientIds: ['mira'], behavior: 'respectful_exchange' }),
+    { type: 'player.behavior', eventId: 'ptt-trust-2', tick: 2, recipientIds: ['mira'], behavior: 'respectful_exchange' },
+  );
+  const eligible = resolvePttResidentIntent(trusted, { ...scene, tick: 3 }, 17, response);
+  assert.equal(eligible?.intent.beatId, 'mira-disclose-sighting');
+  assert.equal(eligible?.intent.speech.kind === 'authored_line' && eligible.intent.speech.lineId, 'mira-sighting-disclosure');
+  assert.equal(eligible?.intent.allowedFactIds.includes('mira-sighting'), true);
+  assert.equal(resolvePttResidentIntent(trusted, { ...scene, locationId: 'market-well', tick: 3 }, 17, response), null);
+  assert.equal(resolvePttResidentIntent(trusted, scene, 17, {
+    playerIntent: 'ask_about_known_topic', topic: 'garden', lineId: 'mira-sighting-disclosure',
+  }), null);
 });
 
 test('beat choice is repeatable and expiry/cooldown prevents immediate replay', () => {

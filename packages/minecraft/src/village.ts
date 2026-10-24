@@ -5,9 +5,11 @@ import {
   authoredLine,
   createVillageCognitionState,
   getResidentKnowledgeContext,
+  latestHeardClaimEventId,
+  isPublicObservableFactId,
+  resolvePttResidentIntent,
   reduceVillageObservation,
   selectResidentIntent,
-  VILLAGE_FACTS,
   validateResidentIntent,
   type ResidentIntentContext,
   type SelectedResidentIntent,
@@ -23,8 +25,9 @@ import {
   type VillagePttCommand,
 } from './village-event.ts';
 import { villageDialogue, villageMysteryDialogue, villageProfiles } from './village-profiles.ts';
+import { createAmbientUtteranceObservation, nextResidentDialogueTurn, type ResidentDialogueCursor } from './village-dialogue-scheduler.ts';
 import { createRoutineWorldObservation } from './village-observations.ts';
-import { distance3d, isWithinExplorerWatchRange, rendezvousExchange, shouldPauseForExplorer, VillageAi } from './village-ai.ts';
+import { distance3d, isWithinExplorerWatchRange, shouldPauseForExplorer, VillageAi } from './village-ai.ts';
 
 // Optional explicit env file keeps credentials in the local launcher process only.
 if (process.env.BOSON_AI_ENV_FILE) process.loadEnvFile(process.env.BOSON_AI_ENV_FILE);
@@ -44,7 +47,6 @@ const bots = new Map(villageProfiles.map((profile) => {
 }));
 const spawned = new Set<string>();
 const homePositions = new Map<string, { x: number; y: number; z: number }>();
-const meetingResidents = new Set<string>();
 const lastWatchTurnAt = new Map<string, number>();
 const awarenessTimers: ReturnType<typeof setInterval>[] = [];
 const activePttTurns = new Map<string, { residentId: string; startedAt: number; expiresAt: number; beginAck: VillagePttAck }>();
@@ -93,13 +95,6 @@ function residentDistances(explorer: { x: number; y: number; z: number }): Array
     const bot = bots.get(id);
     return bot?.entity ? [{ residentId: id, distance: distance3d(bot.entity.position, explorer) }] : [];
   }).sort((left, right) => left.distance - right.distance || left.residentId.localeCompare(right.residentId));
-}
-
-function residentIdsNearPoint(point: { x: number; y: number; z: number }, radius: number): string[] {
-  return villageProfiles.flatMap(({ id }) => {
-    const bot = bots.get(id);
-    return bot?.entity && distance3d(bot.entity.position, point) <= radius ? [id] : [];
-  });
 }
 
 function currentRoutineStop(residentId: string): string {
@@ -261,12 +256,18 @@ function completePttTurn(command: Extract<VillagePttCommand, { type: 'ptt.comple
     sendPttAck({ version: 1, type: 'ptt.ack', phase: 'complete', turnId: command.turnId, status: 'no_session' });
     return;
   }
-  const initialContext = getResidentKnowledgeContext(cognitionState.current, active.residentId);
+  const locationId = currentRoutineStop(active.residentId);
+  const heardClaimEventId = latestHeardClaimEventId(cognitionState.current, active.residentId, 'tobin', 'route-mark');
   const semanticResponse = asSemanticResponse(command.response);
   const validatedResponse = semanticResponse
-    ? validateSemanticResponse(semanticResponse, { residentId: active.residentId, context: initialContext })
+    ? validateSemanticResponse(semanticResponse, { residentId: active.residentId, context: getResidentKnowledgeContext(cognitionState.current, active.residentId) })
     : null;
-  const fallback = validatedResponse === null;
+  if (command.response !== null && !validatedResponse) {
+    resolvedPttTurns.set(command.turnId, 'completed');
+    sendPttAck({ version: 1, type: 'ptt.ack', phase: 'complete', turnId: command.turnId, status: 'rejected' });
+    return;
+  }
+  const fallback = command.response === null;
   const playerIntent = validatedResponse?.playerIntent ?? 'unknown';
   const topic = validatedResponse?.topic ?? 'general';
   const now = Date.now();
@@ -293,16 +294,21 @@ function completePttTurn(command: Extract<VillagePttCommand, { type: 'ptt.comple
     });
   }
 
-  let intentContext: ResidentIntentContext = {
+  const localScene = {
     residentId: active.residentId,
-    playerIntent: validatedResponse?.playerIntent ?? 'greet',
-    topic: validatedResponse?.topic ?? 'general',
-    locationId: currentRoutineStop(active.residentId),
+    locationId,
     tick: now,
+    ...(heardClaimEventId ? { heardClaimEventId } : {}),
   };
-  let intent = selectResidentIntent(cognitionState.current, intentContext, now >>> 0, validatedResponse ?? undefined);
-  if (!intent && (intentContext.playerIntent !== 'greet' || intentContext.topic !== 'general')) {
-    intentContext = { ...intentContext, playerIntent: 'greet', topic: 'general' };
+  let intentContext: ResidentIntentContext = { ...localScene, playerIntent: 'greet', topic: 'general' };
+  let intent: SelectedResidentIntent | null = null;
+  if (validatedResponse) {
+    const resolved = resolvePttResidentIntent(cognitionState.current, localScene, now >>> 0, validatedResponse);
+    if (resolved) {
+      intentContext = resolved.context;
+      intent = resolved.intent;
+    }
+  } else {
     intent = selectResidentIntent(cognitionState.current, intentContext, now >>> 0);
   }
   if (!intent || !validateResidentIntent(cognitionState.current, intent, intentContext)) {
@@ -418,14 +424,13 @@ for (const profile of villageProfiles) {
 
 async function runVillageRoutine(): Promise<void> {
   for (const [index, profile] of villageProfiles.entries()) void runResidentRoutine(profile, index);
-  void runVillageDialogue();
+  for (const [index, profile] of villageProfiles.entries()) void runResidentDialogue(profile, index);
 }
 
 async function runResidentRoutine(profile: typeof villageProfiles[number], index: number): Promise<void> {
   let stopIndex = index % profile.routine.length;
   await wait(index * 2_500);
   while (!stopping) {
-    if (meetingResidents.has(profile.id)) { await wait(500); continue; }
     const bot = bots.get(profile.id);
     const home = homePositions.get(profile.id);
     const stopAt = profile.routine[stopIndex % profile.routine.length];
@@ -480,83 +485,49 @@ async function runResidentRoutine(profile: typeof villageProfiles[number], index
   }
 }
 
-async function runVillageDialogue(): Promise<void> {
-  let turnIndex = 0;
-  let clueIndex = 0;
+const AMBIENT_DIALOGUE_CADENCE_MS = 20_000;
+
+async function runResidentDialogue(profile: typeof villageProfiles[number], phaseIndex: number): Promise<void> {
+  let cursor: ResidentDialogueCursor = { nextIndex: 0 };
+  await wait(phaseIndex * 1_000);
   while (!stopping) {
-    const isMystery = turnIndex >= villageDialogue.length;
-    const ambientIndex = turnIndex;
-    const turn = isMystery ? villageMysteryDialogue[(clueIndex++) % villageMysteryDialogue.length] : villageDialogue[turnIndex++];
-    if (!turn) { await wait(1_000); continue; }
-    const profile = villageProfiles.find(({ id }) => id === turn.speakerId);
+    const scheduled = nextResidentDialogueTurn(profile.id, [...villageMysteryDialogue, ...villageDialogue], cursor);
+    if (!scheduled) { await wait(AMBIENT_DIALOGUE_CADENCE_MS); continue; }
+    cursor = scheduled.cursor;
+    const turn = scheduled.turn;
+    const clueId = turn.clueId && isPublicObservableFactId(turn.clueId) ? turn.clueId : undefined;
     const listener = villageProfiles.find(({ id }) => id === turn.listenerId);
     const bot = bots.get(turn.speakerId);
     const listenerBot = bots.get(turn.listenerId);
-    if (!profile || !listener || !bot || !listenerBot || !bot.entity || !listenerBot.entity) { await wait(2_000); continue; }
-    const meetingStop = profile.routine.find(({ id }) => id === turn.stopId);
-    const home = homePositions.get(profile.id);
-    if (!meetingStop || !home) { await wait(2_000); continue; }
-    const [offsetX, offsetZ] = meetingStop.offset;
-    const target = { x: home.x + offsetX, y: home.y, z: home.z + offsetZ };
-    meetingResidents.add(profile.id);
-    meetingResidents.add(listener.id);
-    bot.pathfinder.setGoal(null);
-    listenerBot.pathfinder.setGoal(null);
-    let met = false;
-    try {
-      met = await rendezvousExchange(profile.id, listener.id, target,
-        async (residentId, place) => {
-          const actor = bots.get(residentId);
-          if (!actor) throw new Error('meeting resident unavailable');
-          const radius = residentId === profile.id ? 1 : 3;
-          await actor.pathfinder.goto(new goals.GoalNear(place.x, place.y, place.z, radius));
-        },
-        (residentId) => {
-          const actor = bots.get(residentId);
-          if (!actor?.entity) return null;
-          const at = actor.entity.position;
-          return { x: at.x, y: at.y, z: at.z };
-        });
-    } catch (error) {
-      if (!stopping) process.stderr.write(`${profile.username} exchange rendezvous paused: ${error instanceof Error ? error.message : String(error)}\n`);
-    }
-    meetingResidents.delete(profile.id);
-    meetingResidents.delete(listener.id);
-    if (!met || stopping) { await wait(1_000); continue; }
+    if (!listener || !bot || !listenerBot || !bot.entity || !listenerBot.entity) { await wait(AMBIENT_DIALOGUE_CADENCE_MS); continue; }
 
     const turnKey = `${turn.speakerId}:${turn.listenerId}`;
-    const options = isMystery ? [] : villageDialogue
+    const options = villageDialogue
       .map((candidate, index) => ({ id: `ambient-${index}`, line: candidate.line, speakerId: candidate.speakerId, listenerId: candidate.listenerId }))
       .filter((candidate) => candidate.speakerId === turn.speakerId && candidate.listenerId === turn.listenerId)
       .map(({ id, line }) => ({ id, line }));
-    const fallbackId = `ambient-${ambientIndex}`;
-    if (!isMystery && options.length > 1 && process.env.BOSON_VILLAGE_AI === '1' && ai.plannerDue()) {
+    const fallbackId = turn.clueId ? `mystery-${turn.clueId}` : `ambient-${villageDialogue.indexOf(turn)}`;
+    if (!clueId && options.length > 1 && process.env.BOSON_VILLAGE_AI === '1' && ai.plannerDue()) {
       void ai.planDialogue({ speaker: profile.id, listener: listener.id, activity: profile.role, clueStage: 0, options }, fallbackId)
         .then((lineId) => { plannedLineIds.set(turnKey, lineId); })
         .catch(() => { /* Provider failures are handled inside the adapter; retain authored line. */ });
     }
     const selectedId = plannedLineIds.get(turnKey);
     const plannedOption = options.find(({ id }) => id === selectedId);
-    const line = plannedOption?.line ?? turn.line;
+    const line = clueId ? turn.line : plannedOption?.line ?? turn.line;
     const position = bot.entity.position.floored();
     const eventId = `village-utterance-${++dialogueSequence}`;
-    const clueId = isMystery ? (turn as typeof villageMysteryDialogue[number]).clueId : undefined;
-    const clue = clueId ? VILLAGE_FACTS[clueId as keyof typeof VILLAGE_FACTS] : undefined;
-    const topic = clue?.topic ?? 'general';
-    const heardBy = residentIdsNearPoint({ x: position.x, y: position.y, z: position.z }, RESIDENT_HEARING_RADIUS)
-      .filter((residentId) => residentId !== profile.id);
-    if (heardBy.length > 0) {
-      const observation: VillageObservation = {
-        type: 'resident.utterance',
-        eventId,
-        tick: Date.now(),
-        recipientIds: heardBy,
-        speakerId: profile.id,
-        topic,
-        ...(clueId ? { claimedFactId: clueId } : {}),
-      };
-      cognitionState.current = reduceVillageObservation(cognitionState.current, observation);
-    }
+    const observation = createAmbientUtteranceObservation({
+      eventId, tick: Date.now(), speakerId: profile.id, turn,
+      speakerPosition: { x: position.x, y: position.y, z: position.z },
+      residents: villageProfiles.flatMap(({ id }) => {
+        const residentBot = bots.get(id);
+        const residentPosition = residentBot?.entity?.position;
+        return residentPosition ? [{ id, position: { x: residentPosition.x, y: residentPosition.y, z: residentPosition.z } }] : [];
+      }),
+      hearingRadius: RESIDENT_HEARING_RADIUS,
+    });
+    if (observation) cognitionState.current = reduceVillageObservation(cognitionState.current, observation);
     bot.chat(line);
     const playerPosition = currentExplorerPosition();
     const lineId = clueId ? `mystery-${clueId}` : plannedOption?.id ?? fallbackId;
@@ -565,8 +536,7 @@ async function runVillageDialogue(): Promise<void> {
     if (playerPosition && distance3d(playerPosition, position) <= RESIDENT_HEARING_RADIUS) {
       process.stdout.write(`${JSON.stringify(event)}\n`);
     }
-    await watchExplorer(bot);
-    await wait(8_000);
+    await wait(AMBIENT_DIALOGUE_CADENCE_MS);
   }
 }
 

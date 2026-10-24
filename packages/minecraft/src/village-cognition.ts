@@ -91,6 +91,12 @@ export interface SemanticResponse {
   lineId: string;
 }
 
+export interface ResolvedPttResidentIntent {
+  semanticResponse: SemanticResponse;
+  context: ResidentIntentContext;
+  intent: SelectedResidentIntent;
+}
+
 export const VILLAGE_FACTS = Object.freeze({
   'silent-bell': { topic: 'bell', text: 'Rowan’s usual dawn bell did not ring.' },
   'mira-sighting': { topic: 'garden', text: `${RESIDENT_DISPLAY_NAMES.mira} saw ${RESIDENT_DISPLAY_NAMES.pip} return by the garden path before dawn.` },
@@ -103,6 +109,10 @@ export const VILLAGE_FACTS = Object.freeze({
 
 type FactId = keyof typeof VILLAGE_FACTS;
 const PUBLIC_OBSERVABLE_FACTS: readonly FactId[] = ['silent-bell', 'seedlings-safe', 'flour-ledger', 'route-mark'];
+
+export function isPublicObservableFactId(value: string): value is FactId {
+  return value in VILLAGE_FACTS && PUBLIC_OBSERVABLE_FACTS.includes(value as FactId);
+}
 
 interface AuthoredBeat {
   id: string;
@@ -199,6 +209,17 @@ export function createVillageCognitionState(): VillageCognitionState {
       knownFactIds: [...profile.knownFactIds], heardClaims: [], trust: 0, completedBeatTicks: {}, lastResponseTick: null,
     }])),
   };
+}
+
+/** Returns a claim event recorded by this resident, so callers cannot ground a response in a bystander's hearing. */
+export function latestHeardClaimEventId(
+  state: VillageCognitionState,
+  residentId: string,
+  sourceId: string,
+  claimedFactId: string,
+): string | undefined {
+  const claims = state.residents[residentId]?.heardClaims ?? [];
+  return [...claims].reverse().find((claim) => claim.sourceId === sourceId && claim.claimedFactId === claimedFactId)?.eventId;
 }
 
 export function reduceVillageObservation(state: VillageCognitionState, observation: VillageObservation): VillageCognitionState {
@@ -335,6 +356,28 @@ export function validateSemanticResponse(
   const responseBeat = AUTHORED_BEATS.find((beat) => beat.residentId === options.residentId && beat.lineId === candidate.lineId && beat.modelSelectableLine);
   if (!responseBeat) return null;
   return { playerIntent: candidate.playerIntent, topic: candidate.topic, lineId: candidate.lineId };
+}
+
+/** Validate only public model choices, then derive the actual local story intent independently. */
+export function resolvePttResidentIntent(
+  state: VillageCognitionState,
+  scene: Omit<ResidentIntentContext, 'playerIntent' | 'topic'>,
+  seed: number,
+  value: unknown,
+): ResolvedPttResidentIntent | null {
+  const semanticResponse = validateSemanticResponse(value, {
+    residentId: scene.residentId,
+    context: getResidentKnowledgeContext(state, scene.residentId),
+  });
+  if (!semanticResponse) return null;
+  const context: ResidentIntentContext = {
+    ...scene,
+    playerIntent: semanticResponse.playerIntent,
+    topic: semanticResponse.topic,
+  };
+  const intent = selectResidentIntent(state, context, seed, semanticResponse);
+  if (!intent || !validateResidentIntent(state, intent, context)) return null;
+  return { semanticResponse, context, intent };
 }
 
 function eligibleBeats(state: VillageCognitionState, context: ResidentIntentContext): readonly AuthoredBeat[] {
