@@ -1,0 +1,319 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="color-scheme" content="light">
+  <title>Boson audio bench</title>
+  <style nonce="__CSP_NONCE__">
+    :root {
+      color-scheme: light;
+      --paper: #f3efe4;
+      --ink: #1e2929;
+      --muted: #596864;
+      --line: #c9c9b9;
+      --signal: #bc4c2e;
+      --signal-dark: #87351f;
+      --good: #286549;
+      --warn: #9b591b;
+      --panel: #fbf9f1;
+      --mono: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+      font-family: Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+      color: var(--ink);
+      background: var(--paper);
+    }
+    * { box-sizing: border-box; }
+    body { margin: 0; min-width: 320px; background: var(--paper); }
+    main { width: min(1080px, calc(100% - 36px)); margin: 0 auto; padding: 28px 0 52px; }
+    .masthead { display: flex; align-items: center; justify-content: space-between; gap: 20px; border-bottom: 1px solid var(--ink); padding-bottom: 12px; }
+    .mark, .eyebrow, .micro-label { font: 700 11px/1.2 var(--mono); letter-spacing: .11em; text-transform: uppercase; }
+    .mark { display: flex; align-items: center; gap: 10px; }
+    .mark-dot { width: 11px; height: 11px; border-radius: 50%; background: var(--signal); box-shadow: 0 0 0 4px rgba(188,76,46,.13); }
+    .local-only { border: 1px solid var(--line); border-radius: 999px; padding: 7px 10px; color: var(--muted); font: 600 11px/1 var(--mono); letter-spacing: .06em; text-transform: uppercase; }
+    .intro { display: grid; grid-template-columns: minmax(0, 1.2fr) minmax(250px, .8fr); gap: 36px; align-items: end; padding: 30px 0 24px; }
+    h1 { max-width: 700px; margin: 7px 0 0; font: 500 clamp(36px, 6.5vw, 70px)/.96 Georgia, "Times New Roman", serif; letter-spacing: -.045em; }
+    .dek { max-width: 410px; margin: 0; color: var(--muted); font-size: 15px; line-height: 1.55; }
+    .workbench { display: grid; grid-template-columns: minmax(0, 1.08fr) minmax(300px, .92fr); border-top: 1px solid var(--ink); border-bottom: 1px solid var(--ink); }
+    .left-rail { padding: 22px 28px 24px 0; }
+    .right-rail { border-left: 1px solid var(--line); padding: 22px 0 24px 28px; }
+    .fixture { display: grid; grid-template-columns: 66px 1fr; gap: 14px; align-items: center; margin: 13px 0 18px; }
+    .avatar { display: grid; place-items: center; width: 66px; aspect-ratio: 1; border-radius: 50%; color: var(--paper); background: var(--ink); font: 500 26px Georgia, serif; }
+    h2 { margin: 3px 0 2px; font: 500 27px/1.1 Georgia, "Times New Roman", serif; }
+    .role { margin: 0; color: var(--muted); font-size: 13px; }
+    .public-note { display: flex; gap: 10px; align-items: baseline; color: var(--muted); font-size: 13px; }
+    .public-note strong { color: var(--ink); font-weight: 650; }
+    .reply-line { margin: 15px 0 18px; padding: 12px 15px; border-left: 3px solid var(--signal); background: rgba(255,255,255,.52); font: italic 17px/1.38 Georgia, serif; }
+    .instructions { margin: 0 0 18px; padding-left: 20px; color: var(--muted); font-size: 13px; line-height: 1.55; }
+    .instructions li + li { margin-top: 4px; }
+    .enable-audio { display: inline-flex; min-height: 42px; align-items: center; border: 1px solid var(--ink); border-radius: 4px; padding: 0 14px; color: var(--paper); background: var(--ink); font: 650 13px/1 var(--mono); cursor: pointer; }
+    .enable-audio:hover { background: #344542; }
+    .enable-audio:focus-visible, button:focus-visible { outline: 3px solid #087f75; outline-offset: 3px; }
+    .audio-enable-note { display: inline-block; margin-left: 9px; color: var(--muted); font-size: 12px; vertical-align: middle; }
+    #ptt-slot, #audio-slot { margin-top: 14px; }
+    #ptt-slot #boson-ptt { position: static !important; z-index: auto !important; width: 100% !important; padding: 12px 0 0 !important; border: 0 !important; border-top: 1px dashed var(--line) !important; border-radius: 0 !important; color: var(--ink) !important; background: transparent !important; font: inherit !important; }
+    #ptt-slot #boson-ptt strong { display: none !important; }
+    #ptt-slot #boson-ptt button { min-height: 54px !important; width: 100% !important; border: 0 !important; border-radius: 4px !important; color: white !important; background: var(--signal) !important; font: 700 14px/1 var(--mono) !important; letter-spacing: .07em !important; text-transform: uppercase !important; }
+    #ptt-slot #boson-ptt button:hover:not(:disabled) { background: var(--signal-dark) !important; }
+    #ptt-slot #boson-ptt button:disabled { background: #888d82 !important; }
+    #ptt-slot #boson-ptt-status { display: block; min-height: 22px; margin-top: 9px; color: var(--muted); font: 12px/1.5 var(--mono) !important; }
+    #audio-slot #boson-audio { position: static !important; z-index: auto !important; width: 100% !important; padding: 11px 0 0 !important; border: 0 !important; border-top: 1px dashed var(--line) !important; border-radius: 0 !important; color: var(--ink) !important; background: transparent !important; font: inherit !important; }
+    #audio-slot #boson-audio strong { display: none !important; }
+    #audio-slot #boson-audio p { margin: 0 0 7px !important; font: 14px/1.4 Georgia, serif !important; }
+    #audio-slot #boson-audio button { min-height: 30px; margin: 0 5px 0 0 !important; padding: 5px 9px !important; border: 1px solid var(--line) !important; border-radius: 3px !important; color: var(--ink) !important; background: transparent !important; font: 600 11px/1 var(--mono) !important; }
+    #audio-slot #boson-pause, #audio-slot #boson-stop { display: none; }
+    #boson-audio-status { display: block; min-height: 20px; margin-top: 8px; color: var(--muted); font: 11px/1.45 var(--mono); }
+    .signal-list { position: relative; display: grid; gap: 0; margin-top: 11px; }
+    .signal-list::before { position: absolute; top: 15px; bottom: 18px; left: 7px; width: 1px; background: var(--line); content: ""; }
+    .signal-row { position: relative; display: grid; grid-template-columns: 16px minmax(88px, .75fr) minmax(0, 1.25fr); gap: 11px; align-items: start; min-height: 54px; padding: 0 0 12px; }
+    .signal-dot { z-index: 1; width: 15px; height: 15px; margin-top: 1px; border: 2px solid var(--line); border-radius: 50%; background: var(--paper); }
+    .signal-dot[data-state="good"] { border-color: var(--good); background: var(--good); }
+    .signal-dot[data-state="warn"] { border-color: var(--warn); background: var(--warn); }
+    .signal-name { color: var(--muted); font: 700 10px/1.35 var(--mono); letter-spacing: .06em; text-transform: uppercase; }
+    .signal-value { min-width: 0; color: var(--ink); font: 12px/1.4 var(--mono); overflow-wrap: anywhere; }
+    .usage { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 13px 20px; margin-top: 5px; padding-top: 15px; border-top: 1px solid var(--line); }
+    .usage-item strong { display: block; margin-top: 5px; font: 600 15px/1.3 var(--mono); }
+    .usage-foot { margin: 11px 0 0; color: var(--muted); font: 11px/1.5 var(--mono); }
+    .foot { display: flex; justify-content: space-between; gap: 16px; margin-top: 12px; color: var(--muted); font: 10px/1.4 var(--mono); text-transform: uppercase; letter-spacing: .05em; }
+    .error { color: var(--signal-dark) !important; }
+    .success { color: var(--good) !important; }
+    @media (max-width: 740px) {
+      main { width: min(100% - 28px, 600px); padding-top: 16px; }
+      .intro { grid-template-columns: 1fr; gap: 13px; padding: 24px 0 18px; }
+      .dek { max-width: 560px; }
+      .workbench { grid-template-columns: 1fr; }
+      .left-rail { padding: 18px 0 21px; }
+      .right-rail { border-left: 0; border-top: 1px solid var(--line); padding: 19px 0 21px; }
+    }
+    @media (prefers-reduced-motion: no-preference) {
+      .signal-dot[data-state="good"] { animation: settle 240ms ease-out both; }
+      @keyframes settle { from { transform: scale(.72); } to { transform: scale(1); } }
+    }
+  </style>
+</head>
+<body>
+  <main>
+    <header class="masthead">
+      <div class="mark"><span class="mark-dot" aria-hidden="true"></span><span>Boson · audio bench</span></div>
+      <span class="local-only">Loopback · isolated fixture</span>
+    </header>
+    <section class="intro" aria-labelledby="page-title">
+      <div><p class="eyebrow">Push-to-talk integration check</p><h1 id="page-title">Voice loop, before the world.</h1></div>
+      <p class="dek">One real held turn to Boson Realtime, followed by one authored resident reply through Boson TTS. No Minecraft world is started. No speech is sent until you hold the talk button.</p>
+    </section>
+
+    <div class="workbench">
+      <section class="left-rail" aria-labelledby="fixture-title">
+        <p class="eyebrow">Fixed public resident fixture</p>
+        <div class="fixture">
+          <div class="avatar" aria-hidden="true">A</div>
+          <div><h2 id="fixture-title">Anna</h2><p class="role">Garden helper · one public topic</p></div>
+        </div>
+        <p class="public-note"><strong>Known fact</strong><span>The garden is growing well today.</span></p>
+        <blockquote class="reply-line">“Hello. The garden is growing well today. Thanks for stopping by.”</blockquote>
+        <ol class="instructions">
+          <li>Enable reply audio once, then hold the talk button.</li>
+          <li>Speak briefly and release to send the turn.</li>
+          <li>Check the signal states for Realtime input, response, and TTS playback.</li>
+        </ol>
+        <button id="enable-audio" class="enable-audio" type="button">Enable reply audio</button>
+        <span id="audio-enable-note" class="audio-enable-note">Needed for browser playback.</span>
+        <div id="audio-slot" aria-label="Reply audio controls"></div>
+        <div id="ptt-slot" aria-label="Push-to-talk control"></div>
+      </section>
+
+      <section class="right-rail" aria-labelledby="signal-title">
+        <p id="signal-title" class="eyebrow">Live signal · payloads hidden</p>
+        <div class="signal-list">
+          <div class="signal-row"><span class="signal-dot" id="dot-connection" aria-hidden="true"></span><span class="signal-name">Realtime</span><span class="signal-value" id="realtime-state" role="status" aria-live="polite">Not started</span></div>
+          <div class="signal-row"><span class="signal-dot" id="dot-mic" aria-hidden="true"></span><span class="signal-name">Microphone</span><span class="signal-value" id="mic-state" role="status" aria-live="polite">Released · permission not requested</span></div>
+          <div class="signal-row"><span class="signal-dot" id="dot-input" aria-hidden="true"></span><span class="signal-name">Input to provider</span><span class="signal-value" id="input-state">No audio sent</span></div>
+          <div class="signal-row"><span class="signal-dot" id="dot-response" aria-hidden="true"></span><span class="signal-name">Response</span><span class="signal-value" id="response-state">Waiting for a held turn</span></div>
+          <div class="signal-row"><span class="signal-dot" id="dot-selection" aria-hidden="true"></span><span class="signal-name">Authored line</span><span class="signal-value" id="selection-state">Waiting for turn completion</span></div>
+          <div class="signal-row"><span class="signal-dot" id="dot-tts" aria-hidden="true"></span><span class="signal-name">TTS playback</span><span class="signal-value" id="tts-state">Waiting for authored reply</span></div>
+        </div>
+        <div class="usage" aria-label="Bounded test usage">
+          <div class="usage-item"><span class="micro-label">Realtime turns</span><strong id="turn-usage">0 / 1</strong></div>
+          <div class="usage-item"><span class="micro-label">Hold limit</span><strong>30 seconds</strong></div>
+          <div class="usage-item"><span class="micro-label">TTS requests</span><strong id="tts-usage">0 / 1</strong></div>
+          <div class="usage-item"><span class="micro-label">TTS text cap</span><strong>120 characters</strong></div>
+        </div>
+        <p id="usage-foot" class="usage-foot">Realtime monetary usage is not reported here. TTS estimate uses the adapter’s configured per-character rate; provider billing may differ.</p>
+        <p id="harness-error" class="usage-foot error" role="status" aria-live="polite"></p>
+      </section>
+    </div>
+    <footer class="foot"><span>No world state · one speaker · one turn</span><span>Mic and WebSocket open only on hold</span></footer>
+  </main>
+
+  <script nonce="__CSP_NONCE__">
+    (() => {
+      const NativeWebSocket = window.WebSocket;
+      const styleNonce = document.querySelector('script[nonce]')?.nonce;
+      const createElement = Document.prototype.createElement;
+      Document.prototype.createElement = function (name, ...options) {
+        const element = createElement.call(this, name, ...options);
+        if (String(name).toLowerCase() === 'style' && styleNonce) element.nonce = styleNonce;
+        return element;
+      };
+      const state = { socket: 'not started', inputChunks: 0, inputCommitSent: false, inputCommitted: false, response: 'waiting', error: false };
+      let heldSince = 0;
+      let holdTimer = null;
+      const text = (id, value, stateName) => {
+        const node = document.getElementById(id);
+        node.textContent = value;
+        if (stateName) node.dataset.state = stateName;
+      };
+      const safeMessageType = (raw) => {
+        if (typeof raw !== 'string') return '';
+        const match = /"type"\s*:\s*"([A-Za-z0-9_.-]{1,80})"/.exec(raw);
+        return match?.[1] ?? '';
+      };
+      const render = () => {
+        text('realtime-state', state.socket === 'open' ? 'Configured · session.created received'
+          : state.socket === 'connecting' ? 'Connecting to Boson Realtime'
+            : state.socket.startsWith('error') ? state.socket : 'Not started',
+        state.socket === 'open' ? 'good' : state.socket.startsWith('error') ? 'warn' : '');
+        const ptt = document.querySelector('#boson-ptt button');
+        const pressed = ptt?.getAttribute('aria-pressed') === 'true';
+        const pttStatus = document.querySelector('#boson-ptt-status')?.textContent ?? '';
+        const captureReady = pressed && pttStatus.startsWith('Listening only while held');
+        const holdSeconds = pressed && heldSince ? Math.min(30, Math.floor((Date.now() - heldSince) / 1000)) : 0;
+        text('mic-state', !pressed ? 'Released · production client stops tracks'
+          : `${captureReady ? 'Held · capture active' : 'Held · permission/connection pending'}${holdSeconds ? ` · ${holdSeconds}s` : ''}`,
+        pressed ? 'warn' : '');
+        text('input-state', state.inputCommitted ? `Provider committed input · ${state.inputChunks} audio packets`
+          : state.inputCommitSent ? `Commit sent · ${state.inputChunks} audio packets`
+            : state.inputChunks ? `${state.inputChunks} audio packets sent · awaiting release` : 'No audio sent',
+        state.inputCommitted ? 'good' : '');
+        text('response-state', state.error ? 'Realtime provider error or disconnect'
+          : state.response === 'done' ? 'Realtime response completed'
+            : state.response === 'started' ? 'Realtime response in progress'
+              : state.inputCommitted ? 'Input accepted · waiting for response' : 'Waiting for a held turn',
+        state.error ? 'warn' : state.response === 'done' ? 'good' : '');
+        const playback = document.querySelector('#boson-audio-status')?.textContent ?? '';
+        if (playback.startsWith('Boson Higgs TTS')) {
+          text('tts-state', 'Provider TTS succeeded · spatial playback queued', 'good');
+        } else if (playback.startsWith('Degraded ·')) {
+          text('tts-state', playback.includes('SpeechSynthesis · serialized')
+            ? 'Local browser fallback · provider TTS did not succeed'
+            : 'Provider TTS unavailable · subtitle or browser fallback only', 'warn');
+        } else if (playback.includes('disconnected') || playback.includes('invalid')) {
+          text('tts-state', `Audio path error · ${playback}`, 'warn');
+        } else if (playback && playback !== 'Waiting for local voices') {
+          text('tts-state', playback, '');
+        }
+      };
+      const observeType = (type, inbound = false, errorCode = '') => {
+        if (!type) return;
+        if (type === 'session.update') state.socket = 'connecting';
+        if (type === 'input_audio_buffer.append') state.inputChunks += 1;
+        if (type === 'input_audio_buffer.commit') state.inputCommitSent = true;
+        if (inbound && type === 'session.created') state.socket = 'open';
+        if (inbound && type === 'input_audio_buffer.committed') state.inputCommitted = true;
+        if (inbound && type === 'response.created') state.response = 'started';
+        if (inbound && type === 'response.done') state.response = 'done';
+        if (inbound && type === 'error') { state.error = true; state.socket = errorCode ? `error · ${errorCode}` : 'error · provider event'; }
+        render();
+      };
+      window.WebSocket = class extends NativeWebSocket {
+        constructor(url, protocols) {
+          super(url, protocols);
+          if (String(url).startsWith('wss://api.boson.ai/v1/realtime')) {
+            state.socket = 'connecting';
+            this.addEventListener('open', render);
+            this.addEventListener('message', (event) => observeType(safeMessageType(event.data), true));
+            this.addEventListener('error', () => { state.error = true; state.socket = 'error · WebSocket transport'; render(); });
+            this.addEventListener('close', (event) => {
+              if (!state.socket.startsWith('error')) state.socket = `closed · ${event.code}`;
+              render();
+            });
+          }
+        }
+        send(value) {
+          observeType(safeMessageType(value));
+          return super.send(value);
+        }
+      };
+      window.io = () => ({
+        on(name, callback) {
+          if (name === 'position') callback({ pos: { x: 0, y: 0, z: 0 } });
+        },
+        close() {},
+      });
+      const refreshMic = () => {
+        const pressed = document.querySelector('#boson-ptt button')?.getAttribute('aria-pressed') === 'true';
+        if (pressed && !heldSince) heldSince = Date.now();
+        if (!pressed) heldSince = 0;
+        render();
+      };
+      const handleMutation = () => { refreshMic(); };
+      window.addEventListener('pointerdown', (event) => {
+        if (event.target?.closest?.('#boson-ptt button')) {
+          if (!heldSince) heldSince = Date.now();
+          render();
+        }
+      }, true);
+      window.addEventListener('pointerup', refreshMic, true);
+      window.addEventListener('keyup', refreshMic, true);
+      const statusTimer = window.setInterval(() => { refreshMic(); void refreshUsage(); }, 750);
+      window.addEventListener('ptt-harness-usage', (event) => {
+        const usage = event.detail;
+        text('turn-usage', `${usage.usage.realtimeTurns} / ${usage.limits.realtimeTurns}`);
+        text('tts-usage', `${usage.usage.tts.requests} / ${usage.limits.ttsRequests}`);
+        if (usage.usage.lastTurn) {
+          const turn = usage.usage.lastTurn;
+          const stateText = turn.status === 'authored_response_selected'
+            ? `Provider selected ${turn.playerIntent} · ${turn.topic} · ${turn.lineId}`
+            : `Authored fallback · ${turn.lineId}`;
+          text('selection-state', stateText, turn.status === 'authored_response_selected' ? 'good' : 'warn');
+        }
+        const cost = Number(usage.usage.tts.estimatedUsd).toFixed(6);
+        document.getElementById('usage-foot').textContent = `Realtime billed usage is unknown. TTS estimate so far: $${cost}; provider billing is not reported here.`;
+        render();
+      });
+      window.addEventListener('ptt-audio-render', render);
+      async function refreshUsage() {
+        try {
+          const response = await fetch('/harness/status', { cache: 'no-store', credentials: 'same-origin' });
+          if (!response.ok) throw new Error('status_unavailable');
+          const usage = await response.json();
+          window.dispatchEvent(new CustomEvent('ptt-harness-usage', { detail: usage }));
+        } catch {
+          text('harness-error', 'Local usage status is unavailable.', 'warn');
+        }
+      }
+      document.getElementById('enable-audio').addEventListener('click', () => {
+        document.querySelector('#boson-enable')?.click();
+        document.getElementById('audio-enable-note').textContent = 'Reply audio enabled for this tab.';
+      });
+      window.addEventListener('load', () => {
+        const pttPanel = document.querySelector('#boson-ptt');
+        const audioPanel = document.querySelector('#boson-audio');
+        if (pttPanel) document.querySelector('#ptt-slot').append(pttPanel);
+        if (audioPanel) document.querySelector('#audio-slot').append(audioPanel);
+        const observer = new MutationObserver(handleMutation);
+        for (const node of [pttPanel, audioPanel].filter(Boolean)) observer.observe(node, { childList: true, subtree: true, characterData: true, attributes: true });
+        document.getElementById('dot-connection').dataset.state = '';
+        render();
+        void refreshUsage();
+      }, { once: true });
+      holdTimer = window.setInterval(() => { if (heldSince) render(); }, 250);
+      window.addEventListener('pagehide', () => {
+        window.clearInterval(holdTimer);
+        window.clearInterval(statusTimer);
+      }, { once: true });
+    })();
+  </script>
+  <script type="module" nonce="__CSP_NONCE__">
+    await import('/boson-audio.js');
+    await import('/boson-ptt.js');
+    const pttPanel = document.querySelector('#boson-ptt');
+    const audioPanel = document.querySelector('#boson-audio');
+    if (pttPanel) document.querySelector('#ptt-slot')?.append(pttPanel);
+    if (audioPanel) document.querySelector('#audio-slot')?.append(audioPanel);
+    const statusObserver = new MutationObserver(() => window.dispatchEvent(new Event('ptt-audio-render')));
+    for (const node of [document.querySelector('#boson-ptt-status'), document.querySelector('#boson-audio-status')].filter(Boolean)) {
+      statusObserver.observe(node, { childList: true, subtree: true, characterData: true });
+    }
+  </script>
+</body>
+</html>
