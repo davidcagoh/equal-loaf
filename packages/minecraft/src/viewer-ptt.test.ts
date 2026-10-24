@@ -1,9 +1,24 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
-import { parseCompletedPttResponse } from './viewer-ptt.js';
+import {
+  appendBoundedPttText,
+  evaluateCompletedPttResponse,
+  parseCompletedPttResponse,
+  recordSingleTerminalPttText,
+} from './viewer-ptt.js';
 
 const allowedLineIds = ['mira-greeting'];
 const boundedResponse = JSON.stringify({ playerIntent: 'greet', topic: 'general', lineId: 'mira-greeting' });
+
+test('oversized provider deltas are rejected before being retained and remain rejected', () => {
+  const asciiOverflow = appendBoundedPttText('', 'x'.repeat(2_001));
+  const unicodeOverflow = appendBoundedPttText('', '🗣'.repeat(501));
+  const afterOverflow = appendBoundedPttText('', boundedResponse, true);
+
+  assert.deepEqual(asciiOverflow, { text: '', rejected: true });
+  assert.deepEqual(unicodeOverflow, { text: '', rejected: true });
+  assert.deepEqual(afterOverflow, { text: '', rejected: true });
+});
 
 test('completed terminal text replaces accumulated deltas without duplicate content', () => {
   const parsed = parseCompletedPttResponse({
@@ -35,6 +50,52 @@ test('terminal output_text.done is used when response.done has no output array',
   assert.deepEqual(parsed, { playerIntent: 'greet', topic: 'general', lineId: 'mira-greeting' });
 });
 
+test('multiple terminal text parts are rejected when final response output is absent', () => {
+  const outcome = evaluateCompletedPttResponse(
+    { type: 'response.done', response: { status: 'completed' } },
+    '', boundedResponse, allowedLineIds, 2,
+  );
+
+  assert.equal(outcome.response, null);
+  assert.equal(outcome.rejectionReason, 'response_text_multiple_parts');
+});
+
+test('response output text parts and item arrays are bounded', () => {
+  const repeatedText = evaluateCompletedPttResponse({
+    type: 'response.done',
+    response: {
+      status: 'completed',
+      output: [{ type: 'message', role: 'assistant', content: [
+        { type: 'output_text', text: boundedResponse },
+        { type: 'output_text', text: boundedResponse },
+      ] }],
+    },
+  }, '', null, allowedLineIds);
+  const oversizedOutput = evaluateCompletedPttResponse({
+    type: 'response.done',
+    response: { status: 'completed', output: Array(33).fill({ type: 'message', role: 'assistant', content: [] }) },
+  }, '', null, allowedLineIds);
+  const oversizedText = evaluateCompletedPttResponse({
+    type: 'response.done',
+    response: {
+      status: 'completed',
+      output: [{ type: 'message', role: 'assistant', content: [{ type: 'output_text', text: ' '.repeat(2_001) }] }],
+    },
+  }, '', null, allowedLineIds);
+
+  assert.equal(repeatedText.rejectionReason, 'response_text_multiple_parts');
+  assert.equal(oversizedOutput.rejectionReason, 'response_output_too_large');
+  assert.equal(oversizedText.rejectionReason, 'response_text_too_large');
+});
+
+test('only one terminal text part is retained', () => {
+  const first = recordSingleTerminalPttText(0, boundedResponse);
+  const second = recordSingleTerminalPttText(first.count, boundedResponse);
+
+  assert.deepEqual(first, { text: boundedResponse, count: 1, rejectionReason: null });
+  assert.deepEqual(second, { text: null, count: 2, rejectionReason: 'response_text_multiple_parts' });
+});
+
 test('malformed and oversized terminal text remain rejected', () => {
   const completed = { type: 'response.done', response: { status: 'completed' } };
 
@@ -44,7 +105,25 @@ test('malformed and oversized terminal text remain rejected', () => {
 
 test('failed or incomplete responses cannot accept parseable partial deltas', () => {
   for (const status of ['failed', 'incomplete', 'cancelled']) {
-    assert.equal(parseCompletedPttResponse({ type: 'response.done', response: { status } }, boundedResponse, null, allowedLineIds), null);
+    const outcome = evaluateCompletedPttResponse({ type: 'response.done', response: { status } }, boundedResponse, null, allowedLineIds);
+    assert.equal(outcome.response, null);
+    assert.equal(outcome.rejectionReason, 'response_status_not_completed');
+  }
+});
+
+test('fallback classification uses safe reason codes and never returns provider text', () => {
+  const completed = { type: 'response.done', response: { status: 'completed' } };
+  const missing = evaluateCompletedPttResponse(completed, '', null, allowedLineIds);
+  const invalidJson = evaluateCompletedPttResponse(completed, '', '{bad json', allowedLineIds);
+  const oversized = evaluateCompletedPttResponse(completed, '', ' '.repeat(2_001), allowedLineIds);
+  const rejectedSchema = evaluateCompletedPttResponse(completed, '', JSON.stringify({ playerIntent: 'greet', topic: 'secret-topic', lineId: 'mira-greeting' }), allowedLineIds);
+
+  assert.equal(missing.rejectionReason, 'response_text_missing');
+  assert.equal(invalidJson.rejectionReason, 'response_json_invalid');
+  assert.equal(oversized.rejectionReason, 'response_text_too_large');
+  assert.equal(rejectedSchema.rejectionReason, 'response_schema_rejected');
+  for (const outcome of [missing, invalidJson, oversized, rejectedSchema]) {
+    assert.equal('text' in outcome, false);
   }
 });
 
@@ -320,7 +399,7 @@ test('PTT sends audio only during hold and requests a text-only tool-free respon
         instructions: 'return bounded json',
         allowedLineIds: ['mira-greeting'],
       }
-        : { accepted: true };
+        : { accepted: true, status: 'accepted' };
     return { ok: true, json: async () => result } as Response;
   }) as typeof fetch;
   const { elements } = await setupBrowser(async () => stream, fetcher, {
@@ -389,11 +468,22 @@ test('PTT sends audio only during hold and requests a text-only tool-free respon
     type: 'response.output_text.delta',
         delta: JSON.stringify({ playerIntent: 'greet', topic: 'general', lineId: 'mira-greeting' }),
   }) });
-  socket.fire('message', { data: JSON.stringify({ type: 'response.done' }) });
+  const finalText = JSON.stringify({ playerIntent: 'greet', topic: 'general', lineId: 'mira-greeting' });
+  socket.fire('message', { data: JSON.stringify({ type: 'response.output_text.done', text: finalText }) });
+  socket.fire('message', { data: JSON.stringify({
+    type: 'response.done',
+    response: {
+      status: 'completed',
+      output: [{ type: 'message', role: 'assistant', content: [{ type: 'output_text', text: finalText }] }],
+    },
+  }) });
   await tick();
   assert.equal(fetchCalls.some(({ path }) => path === '/boson-ptt/begin'), true);
-  assert.equal(fetchCalls.some(({ path, payload }) => path === '/boson-ptt/complete'
-    && (payload as { response?: unknown }).response !== undefined), true);
+  const completionCalls = fetchCalls.filter(({ path }) => path === '/boson-ptt/complete');
+  assert.equal(completionCalls.length, 1);
+  assert.deepEqual((completionCalls[0].payload as { response: unknown }).response, {
+    playerIntent: 'greet', topic: 'general', lineId: 'mira-greeting',
+  });
   assert.equal(tracks[0].stopped, true);
   void module;
 });

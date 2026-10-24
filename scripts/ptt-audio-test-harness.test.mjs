@@ -27,18 +27,12 @@ test('isolated audio harness serves production modules behind local security and
   assert.match(page, /<details id="diagnostics"/);
   assert.match(page, /hold P or the talk button/i);
   assert.match(page, /deriveAudioBenchOutcome/);
-  assert.doesNotMatch(page, /Reply audio enabled for this tab/);
-  assert.match(page, /id="run-controls" hidden/);
-  assert.match(page, /id="enable-audio"[^>]*>Enable audio</);
-  assert.match(page, /<details id="diagnostics"/);
-  assert.match(page, /hold P or the talk button/i);
-  assert.match(page, /deriveAudioBenchOutcome/);
+  assert.match(page, /ptt-response-rejected/);
   assert.doesNotMatch(page, /Reply audio enabled for this tab/);
 
   for (const asset of [
     '/boson-ptt.js',
     '/boson-audio.js',
-    '/ptt-audio-test-view.js',
     '/ptt-audio-test-view.js',
     '/boson-ptt-worklet.js',
     '/village-vocabulary.js',
@@ -52,6 +46,8 @@ test('isolated audio harness serves production modules behind local security and
       assert.match(script, /Hold P to talk/);
       assert.match(script, /document\.addEventListener\('keydown'/);
       assert.match(script, /Microphone permission was denied or blocked/);
+      assert.match(script, /response_text_multiple_parts/);
+      assert.match(script, /appendBoundedPttText/);
     }
   }
 

@@ -167,6 +167,11 @@
       const NativeWebSocket = window.WebSocket;
       const runControls = document.getElementById('run-controls');
       const outcomeSummary = document.getElementById('outcome-summary');
+      const fallbackReasons = new Set([
+        'response_status_not_completed', 'response_output_too_large', 'response_text_missing',
+        'response_text_multiple_parts', 'response_text_too_large',
+        'response_json_invalid', 'response_schema_rejected',
+      ]);
       const styleNonce = document.querySelector('script[nonce]')?.nonce;
       const createElement = Document.prototype.createElement;
       Document.prototype.createElement = function (name, ...options) {
@@ -178,6 +183,7 @@
       let audioEnableRequested = false;
       let audioEnablePending = false;
       let audioEnabled = false;
+      let fallbackReason = null;
       let heldSince = 0;
       let holdTimer = null;
       const text = (id, value, stateName) => {
@@ -230,8 +236,11 @@
         const ptt = document.querySelector('#boson-ptt button');
         const isHeld = ptt?.getAttribute('aria-pressed') === 'true';
         runControls.hidden = outcome.kind !== 'ready' && !(outcome.kind === 'pending' && isHeld);
+        const semanticSelectionAccepted = outcome.kind === 'complete' && !outcome.message.includes('without selecting')
+          && !outcome.message.includes('status was not recorded');
+        const providerAudioReturned = outcome.playback.startsWith('Provider TTS returned audio');
         outcomeSummary.dataset.state = outcome.kind === 'complete'
-          ? outcome.message.includes('without selecting') ? 'warn' : 'good'
+          ? semanticSelectionAccepted && providerAudioReturned ? 'good' : 'warn'
           : '';
         text('outcome-title', outcome.title);
         text('outcome-message', outcome.message);
@@ -331,10 +340,16 @@
           const turn = usage.usage.lastTurn;
           const stateText = turn.status === 'authored_response_selected'
             ? `Provider selected ${turn.playerIntent} · ${turn.topic} · ${turn.lineId}`
-            : `Authored fallback · ${turn.lineId}`;
+            : `Authored fallback · ${fallbackReason ?? turn.lineId}`;
           text('selection-state', stateText, turn.status === 'authored_response_selected' ? 'good' : 'warn');
         }
         render();
+      });
+      window.addEventListener('ptt-response-rejected', (event) => {
+        const reason = event.detail?.reason;
+        if (typeof reason !== 'string' || !fallbackReasons.has(reason)) return;
+        fallbackReason = reason;
+        text('selection-state', `Authored fallback · ${reason}`, 'warn');
       });
       window.addEventListener('ptt-audio-render', render);
       async function refreshUsage() {

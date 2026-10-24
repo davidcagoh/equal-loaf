@@ -6,6 +6,25 @@ const TARGET_SAMPLE_RATE = 24_000;
 const AUDIO_CHUNK_SAMPLES = 960;
 const REALTIME_URL = 'wss://api.boson.ai/v1/realtime';
 const stoppedStreams = new WeakSet();
+const MAX_MODEL_OUTPUT_BYTES = 2_000;
+
+export function appendBoundedPttText(currentText, delta, alreadyRejected = false) {
+  if (alreadyRejected || typeof currentText !== 'string' || typeof delta !== 'string'
+    || currentText.length + delta.length > MAX_MODEL_OUTPUT_BYTES) return { text: '', rejected: true };
+  const text = currentText + delta;
+  return new TextEncoder().encode(text).byteLength > MAX_MODEL_OUTPUT_BYTES
+    ? { text: '', rejected: true }
+    : { text, rejected: false };
+}
+
+export function recordSingleTerminalPttText(currentCount, text) {
+  if (typeof text !== 'string') return { text: null, count: 0, rejectionReason: 'response_text_missing' };
+  if (currentCount > 0) return { text: null, count: currentCount + 1, rejectionReason: 'response_text_multiple_parts' };
+  if (text.length > MAX_MODEL_OUTPUT_BYTES || new TextEncoder().encode(text).byteLength > MAX_MODEL_OUTPUT_BYTES) {
+    return { text: null, count: 1, rejectionReason: 'response_text_too_large' };
+  }
+  return { text, count: 1, rejectionReason: null };
+}
 
 export function isBoundedPttResponse(value, allowedLineIds) {
   if (!value || typeof value !== 'object' || Array.isArray(value)) return false;
@@ -16,6 +35,58 @@ export function isBoundedPttResponse(value, allowedLineIds) {
     && typeof value.topic === 'string' && VILLAGE_TOPICS.includes(value.topic)
     && /^[A-Za-z0-9 _-]+$/.test(value.topic)
     && typeof value.lineId === 'string' && allowedLineIds.includes(value.lineId);
+}
+
+export function evaluateCompletedPttResponse(event, accumulatedText, terminalText, allowedLineIds, terminalPartCount = Number(typeof terminalText === 'string')) {
+  if (!event || typeof event !== 'object' || event.type !== 'response.done'
+    || !event.response || typeof event.response !== 'object' || event.response.status !== 'completed') {
+    return { response: null, rejectionReason: 'response_status_not_completed' };
+  }
+
+  let text;
+  if (Array.isArray(event.response.output)) {
+    if (event.response.output.length > 32) return { response: null, rejectionReason: 'response_output_too_large' };
+    let textPartCount = 0;
+    for (const item of event.response.output) {
+      if (item?.type !== 'message' || item.role !== 'assistant' || !Array.isArray(item.content)) continue;
+      if (item.content.length > 32) return { response: null, rejectionReason: 'response_output_too_large' };
+      for (const part of item.content) {
+        if (part?.type !== 'output_text' || typeof part.text !== 'string') continue;
+        textPartCount += 1;
+        if (textPartCount > 1) return { response: null, rejectionReason: 'response_text_multiple_parts' };
+        if (part.text.length > MAX_MODEL_OUTPUT_BYTES) return { response: null, rejectionReason: 'response_text_too_large' };
+        text = part.text;
+      }
+    }
+    if (textPartCount !== 1) return {
+      response: null,
+      rejectionReason: 'response_text_missing',
+    };
+  } else if (terminalPartCount > 1) {
+    return { response: null, rejectionReason: 'response_text_multiple_parts' };
+  } else if (typeof terminalText === 'string') {
+    text = terminalText;
+  } else if (typeof accumulatedText === 'string') {
+    text = accumulatedText;
+  } else {
+    return { response: null, rejectionReason: 'response_text_missing' };
+  }
+  if (!text) return { response: null, rejectionReason: 'response_text_missing' };
+  if (text.length > MAX_MODEL_OUTPUT_BYTES || new TextEncoder().encode(text).byteLength > MAX_MODEL_OUTPUT_BYTES) {
+    return { response: null, rejectionReason: 'response_text_too_large' };
+  }
+  try {
+    const value = JSON.parse(text);
+    return isBoundedPttResponse(value, allowedLineIds)
+      ? { response: value, rejectionReason: null }
+      : { response: null, rejectionReason: 'response_schema_rejected' };
+  } catch {
+    return { response: null, rejectionReason: 'response_json_invalid' };
+  }
+}
+
+export function parseCompletedPttResponse(event, accumulatedText, terminalText, allowedLineIds) {
+  return evaluateCompletedPttResponse(event, accumulatedText, terminalText, allowedLineIds).response;
 }
 
 export function startViewerPtt() {
@@ -175,8 +246,9 @@ export function startViewerPtt() {
     try {
       const response = await post('/boson-ptt/complete', { turnId: active.turnId, response: modelResponse });
       const result = await response.json().catch(() => ({}));
-      setStatus(response.ok && result.accepted ? 'Nearby villagers heard the turn.'
-        : 'The turn ended; local village dialogue remains available.');
+      setStatus(response.ok && result.status === 'accepted' ? 'A nearby villager selected an authored response.'
+        : response.ok && result.status === 'fallback' ? 'The fixed authored fallback was used; semantic intent was not confirmed.'
+          : 'The turn ended; local village dialogue remains available.');
     } catch {
       setStatus('The turn ended; local village dialogue remains available.');
     }
@@ -195,14 +267,13 @@ export function startViewerPtt() {
     setStatus(message);
   }
 
-  function parseModelOutput(text, allowedLineIds) {
-    if (!text || new TextEncoder().encode(text).byteLength > 2_000) return null;
-    try {
-      const value = JSON.parse(text);
-      return isBoundedPttResponse(value, allowedLineIds) ? value : null;
-    } catch {
-      return null;
-    }
+  function rejectModelOutput(active, reason) {
+    active.responseOutputRejected = true;
+    active.responseText = '';
+    active.terminalResponseText = null;
+    active.terminalResponseCount = 0;
+    window.dispatchEvent(new CustomEvent('ptt-response-rejected', { detail: { reason } }));
+    void completeTurn(active, null);
   }
 
   function validLineIds(value) {
@@ -212,6 +283,7 @@ export function startViewerPtt() {
   }
 
   function handleProviderMessage(active, raw) {
+    if (active.completionSent) return;
     let event;
     try { event = JSON.parse(raw); } catch { return; }
     if (!event || typeof event !== 'object' || typeof event.type !== 'string') return;
@@ -226,16 +298,38 @@ export function startViewerPtt() {
     }
     if (event.type === 'response.output_text.delta') {
       if (typeof event.delta !== 'string') return;
-      active.responseText += event.delta;
-      if (new TextEncoder().encode(active.responseText).byteLength > 2_000) {
+      const appended = appendBoundedPttText(active.responseText, event.delta, active.responseOutputRejected);
+      if (appended.rejected) {
         active.socket.send(JSON.stringify({ type: 'response.cancel' }));
-        void completeTurn(active, null);
+        rejectModelOutput(active, 'response_text_too_large');
+        return;
       }
+      active.responseText = appended.text;
+      return;
+    }
+    if (event.type === 'response.output_text.done') {
+      if (active.responseOutputRejected) return;
+      const terminalText = recordSingleTerminalPttText(active.terminalResponseCount, event.text);
+      active.terminalResponseCount = terminalText.count;
+      if (terminalText.rejectionReason) {
+        active.socket.send(JSON.stringify({ type: 'response.cancel' }));
+        rejectModelOutput(active, terminalText.rejectionReason);
+        return;
+      }
+      active.terminalResponseText = terminalText.text;
       return;
     }
     if (event.type === 'response.done') {
-      const result = parseModelOutput(active.responseText, active.allowedLineIds);
-      void completeTurn(active, result);
+      const { response, rejectionReason } = active.responseOutputRejected
+        ? { response: null, rejectionReason: 'response_text_too_large' }
+        : evaluateCompletedPttResponse(
+          event, active.responseText, active.terminalResponseText, active.allowedLineIds, active.terminalResponseCount,
+        );
+      active.responseText = '';
+      active.terminalResponseText = null;
+      active.terminalResponseCount = 0;
+      if (rejectionReason) window.dispatchEvent(new CustomEvent('ptt-response-rejected', { detail: { reason: rejectionReason } }));
+      void completeTurn(active, response);
       return;
     }
     if (event.type === 'error') {
@@ -316,6 +410,9 @@ export function startViewerPtt() {
       pendingSamples: [],
       samplesSent: 0,
       responseText: '',
+      terminalResponseText: null,
+      terminalResponseCount: 0,
+      responseOutputRejected: false,
       completionSent: false,
       cancelSent: false,
     };
