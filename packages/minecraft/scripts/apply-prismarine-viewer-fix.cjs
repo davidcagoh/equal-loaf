@@ -119,10 +119,10 @@ replaceExpected(
 replaceAnyExpected(
   'public/index.js',
   [
-    'addColumn(t,e,i){this.loadedChunks[`${t},${e}`]=!0;let o=i.minY??0,a=i.worldHeight??256;this.chunkHeightRanges[`${t},${e}`]={minY:o,worldHeight:a};for(const n of this.workers)n.postMessage({type:"chunk",x:t,z:e,chunk:i});for(let i=o;i<o+a;i+=16){',
+    'addColumn(t,e,i){this.loadedChunks[`${t},${e}`]=!0;let r=JSON.parse(i),o=r.minY??0,a=r.worldHeight??256;this.chunkHeightRanges[`${t},${e}`]={minY:o,worldHeight:a};for(const n of this.workers)n.postMessage({type:"chunk",x:t,z:e,chunk:i});for(let i=o;i<o+a;i+=16){',
     'addColumn(t,e,i){this.loadedChunks[`${t},${e}`]=!0;for(const n of this.workers)n.postMessage({type:"chunk",x:t,z:e,chunk:i});for(let i=0;i<256;i+=16){'
   ],
-  'addColumn(t,e,i){this.loadedChunks[`${t},${e}`]=!0;let r=JSON.parse(i),o=r.minY??0,a=r.worldHeight??256;this.chunkHeightRanges[`${t},${e}`]={minY:o,worldHeight:a};for(const n of this.workers)n.postMessage({type:"chunk",x:t,z:e,chunk:i});for(let i=o;i<o+a;i+=16){'
+  'addColumn(t,e,i){this.loadedChunks[`${t},${e}`]=!0;const chunkData=JSON.parse(i),o=chunkData.minY??0,a=chunkData.worldHeight??256;this.chunkHeightRanges[`${t},${e}`]={minY:o,worldHeight:a};for(const n of this.workers)n.postMessage({type:"chunk",x:t,z:e,chunk:i});for(let i=o;i<o+a;i+=16){'
 )
 replaceExpected(
   'public/index.js',
