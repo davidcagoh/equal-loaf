@@ -33,6 +33,12 @@ test('isolated audio harness serves production modules behind local security and
     const response = await fetch(new URL(asset, harness.url));
     assert.equal(response.status, 200, `${asset} should be served`);
     assert.match(response.headers.get('content-type') ?? '', /javascript/);
+    if (asset === '/boson-ptt.js') {
+      const script = await response.text();
+      assert.match(script, /Hold P to talk/);
+      assert.match(script, /document\.addEventListener\('keydown'/);
+      assert.match(script, /Microphone permission was denied or blocked/);
+    }
   }
 
   const statusResponse = await fetch(new URL('/harness/status', harness.url));

@@ -5,6 +5,7 @@ const MAX_TOTAL_INPUT_MS = 300_000;
 const TARGET_SAMPLE_RATE = 24_000;
 const AUDIO_CHUNK_SAMPLES = 960;
 const REALTIME_URL = 'wss://api.boson.ai/v1/realtime';
+const stoppedStreams = new WeakSet();
 
 export function isBoundedPttResponse(value, allowedLineIds) {
   if (!value || typeof value !== 'object' || Array.isArray(value)) return false;
@@ -40,7 +41,7 @@ export function startViewerPtt() {
   const button = document.createElement('button');
   button.type = 'button';
   button.textContent = 'Hold to talk';
-  button.setAttribute('aria-label', 'Hold to talk to the nearest villager');
+  button.setAttribute('aria-label', 'Hold P to talk, or hold this button; release to send');
   button.setAttribute('aria-pressed', 'false');
   const status = document.createElement('span');
   status.id = 'boson-ptt-status';
@@ -57,11 +58,22 @@ export function startViewerPtt() {
   let turnsUsed = 0;
   let totalInputMs = 0;
   let generation = 0;
+  let holdSource = null;
 
   const stopTracks = (stream) => {
+    if (!stream || typeof stream !== 'object' || stoppedStreams.has(stream)) return;
+    stoppedStreams.add(stream);
     for (const track of stream?.getTracks?.() ?? []) track.stop();
   };
   const setStatus = (message) => { status.textContent = message; };
+  const resetHoldControl = () => {
+    if (holdTimer) window.clearTimeout(holdTimer);
+    holdTimer = null;
+    held = false;
+    holdSource = null;
+    button.setAttribute('aria-pressed', 'false');
+    button.textContent = 'Hold to talk';
+  };
   const closeSocket = (socket) => {
     if (socket && socket.readyState < WebSocket.CLOSING) socket.close(1000, 'Push-to-talk turn ended');
   };
@@ -283,9 +295,10 @@ export function startViewerPtt() {
     });
   }
 
-  async function beginHold() {
+  async function beginHold(source = 'button') {
     if (!available || held || currentTurn || turnsUsed >= 10 || totalInputMs >= MAX_TOTAL_INPUT_MS) return;
     held = true;
+    holdSource = source;
     turnsUsed += 1;
     const active = {
       generation: ++generation,
@@ -311,6 +324,7 @@ export function startViewerPtt() {
     button.textContent = 'Release to send';
     setStatus('Requesting microphone access for this held turn…');
     holdTimer = window.setTimeout(() => finishHold(true), MAX_HOLD_MS);
+    let startupStage = 'microphone';
     try {
       if (!navigator.mediaDevices?.getUserMedia) throw new Error('Microphone access is unavailable in this browser.');
       const stream = await navigator.mediaDevices.getUserMedia({ audio: { echoCancellation: true, noiseSuppression: true, channelCount: 1 } });
@@ -321,6 +335,7 @@ export function startViewerPtt() {
         return;
       }
       active.phase = 'awaiting-begin';
+      startupStage = 'local-session';
       setStatus('Connecting to the nearest villager…');
       const response = await fetch('/boson-ptt/begin', { method: 'POST', credentials: 'same-origin', cache: 'no-store', redirect: 'error' });
       const setup = await response.json().catch(() => ({}));
@@ -329,9 +344,10 @@ export function startViewerPtt() {
         || typeof setup.clientSecret !== 'string' || typeof setup.instructions !== 'string'
         || !validLineIds(setup.allowedLineIds)) {
         stopTracks(stream);
+        if (currentTurn === active) currentTurn = null;
+        resetHoldControl();
         if (active.turnId) await cancelTurn(active);
         setStatus(typeof setup.error === 'string' ? setup.error : 'Push-to-talk is unavailable; local village audio remains available.');
-        if (currentTurn === active) currentTurn = null;
         return;
       }
       if (!held || currentTurn !== active || active.releaseRequested) {
@@ -344,19 +360,28 @@ export function startViewerPtt() {
       void connectProvider(active, setup);
     } catch (error) {
       stopTracks(active.stream);
+      if (active.releaseRequested || currentTurn !== active) return;
       if (currentTurn === active) currentTurn = null;
-      setStatus(error instanceof Error && error.message.includes('Microphone')
-        ? error.message : 'Push-to-talk could not start; local village audio remains available.');
+      resetHoldControl();
+      const errorName = error && typeof error === 'object' && 'name' in error && typeof error.name === 'string'
+        ? error.name : '';
+      const errorMessage = startupStage === 'microphone'
+        ? errorName === 'NotAllowedError' || errorName === 'SecurityError'
+          ? 'Microphone permission was denied or blocked. Allow microphone access for this page, then try again.'
+          : errorName === 'NotFoundError'
+            ? 'No microphone was found. Connect or select a microphone, then try again.'
+            : errorName === 'NotReadableError' || errorName === 'AbortError'
+              ? 'The microphone could not be opened. Close other apps using it, then try again.'
+              : 'Microphone access failed. Check this page’s permission and selected input, then try again.'
+        : 'The local Realtime session request failed. Check that this isolated viewer is running, then try again.';
+      setStatus(errorMessage);
     }
   }
 
-  async function finishHold(limitReached = false) {
+  async function finishHold(limitReached = false, source) {
     if (!held) return;
-    held = false;
-    if (holdTimer) window.clearTimeout(holdTimer);
-    holdTimer = null;
-    button.setAttribute('aria-pressed', 'false');
-    button.textContent = 'Hold to talk';
+    if (source && source !== holdSource) return;
+    resetHoldControl();
     const active = currentTurn;
     if (!active) return;
     if (active.phase === 'permission') {
@@ -390,12 +415,38 @@ export function startViewerPtt() {
     if (button.disabled || held) return;
     event.preventDefault();
     try { button.setPointerCapture(event.pointerId); } catch { /* optional browser support */ }
-    void beginHold();
+    void beginHold('pointer');
   }
   function onPointerEnd(event) {
-    if (!held) return;
+    if (!held || holdSource !== 'pointer') return;
     event?.preventDefault?.();
-    void finishHold(false);
+    void finishHold(false, 'pointer');
+  }
+
+  function isEditableTarget(target) {
+    if (!target || typeof target !== 'object') return false;
+    return target.isContentEditable === true
+      || ['INPUT', 'TEXTAREA', 'SELECT'].includes(target.tagName)
+      || Boolean(target.closest?.('[contenteditable=""], [contenteditable="true"], [role="textbox"]'));
+  }
+
+  function isPttSurface(target) {
+    return target === document.body || target === document.documentElement || target === button
+      || Boolean(document.pointerLockElement && target === document.pointerLockElement) || target?.tagName === 'CANVAS';
+  }
+
+  function onPttKeyDown(event) {
+    if (event.code !== 'KeyP' || event.repeat || event.isComposing || button.disabled || held
+      || event.ctrlKey || event.altKey || event.metaKey || event.shiftKey
+      || isEditableTarget(event.target) || !isPttSurface(event.target)) return;
+    event.preventDefault();
+    void beginHold('keyboard-p');
+  }
+
+  function onPttKeyUp(event) {
+    if (event.code !== 'KeyP' || holdSource !== 'keyboard-p') return;
+    event.preventDefault();
+    void finishHold(false, 'keyboard-p');
   }
 
   button.addEventListener('pointerdown', onPointerDown);
@@ -405,13 +456,15 @@ export function startViewerPtt() {
   button.addEventListener('keydown', (event) => {
     if (!['Space', 'Enter'].includes(event.code) || event.repeat || button.disabled || held) return;
     event.preventDefault();
-    void beginHold();
+    void beginHold('button-key');
   });
   button.addEventListener('keyup', (event) => {
-    if (!['Space', 'Enter'].includes(event.code)) return;
+    if (!['Space', 'Enter'].includes(event.code) || holdSource !== 'button-key') return;
     event.preventDefault();
-    void finishHold(false);
+    void finishHold(false, 'button-key');
   });
+  document.addEventListener('keydown', onPttKeyDown);
+  document.addEventListener('keyup', onPttKeyUp);
   window.addEventListener('blur', () => { void finishHold(false); });
   window.addEventListener('pagehide', () => { void finishHold(false); });
   document.addEventListener('visibilitychange', () => {
@@ -423,8 +476,8 @@ export function startViewerPtt() {
     .then((result) => {
       available = Boolean(result.available);
       button.disabled = !available;
-      setStatus(typeof result.message === 'string' ? result.message : available
-        ? 'Hold to talk to the nearest villager.' : 'Push-to-talk is unavailable; local village audio remains available.');
+      setStatus(available ? 'Hold P to talk, or hold the button; release to send.'
+        : typeof result.message === 'string' ? result.message : 'Push-to-talk is unavailable; local village audio remains available.');
     })
     .catch(() => {
       button.disabled = true;

@@ -27,17 +27,29 @@ async function setupBrowser(
   timers: { setTimeout: typeof setTimeout; clearTimeout: typeof clearTimeout } = { setTimeout, clearTimeout },
 ) {
   const elements: FakeElement[] = [];
+  const documentListeners = new Map<string, Array<(event: Record<string, unknown>) => void>>();
+  const windowListeners = new Map<string, Array<(event: Record<string, unknown>) => void>>();
+  const fire = (listeners: Map<string, Array<(event: Record<string, unknown>) => void>>, name: string, event: Record<string, unknown> = {}) => {
+    for (const callback of listeners.get(name) ?? []) callback({ preventDefault() {}, ...event });
+  };
   const documentStub = {
     head: new FakeElement(),
     body: new FakeElement(),
+    documentElement: new FakeElement(),
+    activeElement: null as unknown,
+    pointerLockElement: null as unknown,
     visibilityState: 'visible',
     createElement: () => { const element = new FakeElement(); elements.push(element); return element; },
-    addEventListener() {},
+    addEventListener(name: string, callback: (event: Record<string, unknown>) => void) {
+      documentListeners.set(name, [...(documentListeners.get(name) ?? []), callback]);
+    },
   };
   const windowStub = {
     setTimeout: timers.setTimeout,
     clearTimeout: timers.clearTimeout,
-    addEventListener() {},
+    addEventListener(name: string, callback: (event: Record<string, unknown>) => void) {
+      windowListeners.set(name, [...(windowListeners.get(name) ?? []), callback]);
+    },
   };
   Object.defineProperty(globalThis, 'document', { configurable: true, value: documentStub });
   Object.defineProperty(globalThis, 'window', { configurable: true, value: windowStub });
@@ -46,8 +58,179 @@ async function setupBrowser(
     value: { mediaDevices: { getUserMedia } },
   });
   Object.defineProperty(globalThis, 'fetch', { configurable: true, value: fetcher });
-  return { documentStub, elements };
+  return {
+    documentStub,
+    elements,
+    fireDocument: (name: string, event?: Record<string, unknown>) => fire(documentListeners, name, event),
+    fireWindow: (name: string, event?: Record<string, unknown>) => fire(windowListeners, name, event),
+  };
 }
+
+test('P starts one held turn from the lab surface and keyup releases it while begin is pending', async () => {
+  let micCalls = 0;
+  let tracksStopped = 0;
+  let beginCalls = 0;
+  let cancelCalls = 0;
+  let allowBegin!: (response: Response) => void;
+  const fetcher = (async (input: RequestInfo | URL) => {
+    const path = String(input);
+    if (path === '/boson-ptt/status') return Response.json({ available: true });
+    if (path === '/boson-ptt/begin') {
+      beginCalls += 1;
+      return new Promise<Response>((resolve) => { allowBegin = resolve; });
+    }
+    if (path === '/boson-ptt/cancel') { cancelCalls += 1; return Response.json({ cancelled: true }); }
+    throw new Error(`Unexpected request: ${path}`);
+  }) as typeof fetch;
+  const { documentStub, elements, fireDocument } = await setupBrowser(async () => {
+    micCalls += 1;
+    return { getTracks: () => [{ stop: () => { tracksStopped += 1; } }] };
+  }, fetcher);
+  await import('./viewer-ptt.js?keyboard-hold-p-pending-begin');
+  await tick();
+
+  fireDocument('keydown', { code: 'KeyP', target: documentStub.body, repeat: false });
+  await tick();
+  await tick();
+  fireDocument('keydown', { code: 'KeyP', target: documentStub.body, repeat: true });
+  assert.equal(micCalls, 1);
+  assert.equal(beginCalls, 1, 'autorepeat cannot send duplicate begin requests');
+
+  fireDocument('keyup', { code: 'KeyP', target: documentStub.body });
+  await tick();
+  assert.equal(tracksStopped, 1, 'keyup stops capture while server begin is pending');
+  assert.equal(elements.find((element) => element.id === 'boson-ptt-status')?.textContent, 'Turn cancelled before audio started.');
+  fireDocument('keydown', { code: 'KeyP', target: documentStub.body, repeat: false });
+  fireDocument('keyup', { code: 'KeyP', target: documentStub.body });
+  assert.equal(micCalls, 1, 'another P tap cannot overlap an unresolved begin request');
+  assert.equal(beginCalls, 1);
+
+  allowBegin(Response.json({
+    available: true,
+    turnId: 'late-turn',
+    clientSecret: 'bai-eph-short-lived',
+    instructions: 'return bounded json',
+    allowedLineIds: ['mira-greeting'],
+  }));
+  await tick();
+  await tick();
+  assert.equal(cancelCalls, 1, 'late begin response is cancelled once');
+  assert.equal(micCalls, 1);
+});
+
+test('P shortcut ignores editing targets, modifiers and repeats; blur releases pending microphone access', async () => {
+  let micCalls = 0;
+  let beginCalls = 0;
+  let allowMic!: (stream: unknown) => void;
+  const fetcher = (async (input: RequestInfo | URL) => {
+    if (String(input) === '/boson-ptt/status') return Response.json({ available: true });
+    if (String(input) === '/boson-ptt/begin') beginCalls += 1;
+    return Response.json({ available: true });
+  }) as typeof fetch;
+  const { documentStub, elements, fireDocument, fireWindow } = await setupBrowser(
+    () => { micCalls += 1; return new Promise((resolve) => { allowMic = resolve; }); }, fetcher,
+  );
+  await import('./viewer-ptt.js?keyboard-hold-p-guards');
+  await tick();
+
+  const input = { tagName: 'INPUT', isContentEditable: false };
+  fireDocument('keydown', { code: 'KeyP', target: input, repeat: false });
+  fireDocument('keydown', { code: 'KeyP', target: documentStub.body, ctrlKey: true, repeat: false });
+  fireDocument('keydown', { code: 'KeyP', target: documentStub.body, metaKey: true, repeat: false });
+  fireDocument('keydown', { code: 'KeyP', target: documentStub.body, altKey: true, repeat: false });
+  fireDocument('keydown', { code: 'KeyP', target: documentStub.body, shiftKey: true, repeat: false });
+  fireDocument('keydown', { code: 'KeyP', target: documentStub.body, repeat: true });
+  assert.equal(micCalls, 0, 'unrelated editing and modified/repeated keys do not request microphone');
+
+  fireDocument('keydown', { code: 'KeyP', target: documentStub.body, repeat: false });
+  assert.equal(micCalls, 1);
+  fireWindow('blur');
+  fireWindow('keyup', { code: 'KeyP', target: documentStub.body });
+  allowMic({ getTracks: () => [{ stop() {} }] });
+  await tick();
+  await tick();
+  assert.equal(beginCalls, 0, 'late microphone permission after blur never begins a provider turn');
+  assert.equal(elements.find((element) => element.id === 'boson-ptt')?.children[1].attributes.get('aria-pressed'), 'false');
+});
+
+test('hidden-page change releases a P hold before late microphone permission resolves', async () => {
+  let allowMic!: (stream: unknown) => void;
+  let beginCalls = 0;
+  let tracksStopped = 0;
+  const fetcher = (async (input: RequestInfo | URL) => {
+    if (String(input) === '/boson-ptt/status') return Response.json({ available: true });
+    if (String(input) === '/boson-ptt/begin') beginCalls += 1;
+    return Response.json({ available: true });
+  }) as typeof fetch;
+  const { documentStub, fireDocument } = await setupBrowser(
+    () => new Promise((resolve) => { allowMic = resolve; }), fetcher,
+  );
+  await import('./viewer-ptt.js?keyboard-hold-p-hidden');
+  await tick();
+  fireDocument('keydown', { code: 'KeyP', target: documentStub.body, repeat: false });
+  documentStub.visibilityState = 'hidden';
+  fireDocument('visibilitychange');
+  allowMic({ getTracks: () => [{ stop: () => { tracksStopped += 1; } }] });
+  await tick();
+  await tick();
+  assert.equal(beginCalls, 0);
+  assert.equal(tracksStopped, 1);
+});
+
+test('microphone permission failures report a safe actionable reason without raw exception details', async () => {
+  const fetcher = (async () => Response.json({ available: true })) as typeof fetch;
+  const { elements, documentStub, fireDocument } = await setupBrowser(async () => {
+    throw new DOMException('Denied by user secret-bearing browser detail', 'NotAllowedError');
+  }, fetcher);
+  await import('./viewer-ptt.js?keyboard-hold-p-permission-error');
+  await tick();
+  fireDocument('keydown', { code: 'KeyP', target: documentStub.body, repeat: false });
+  await tick();
+  const status = elements.find((element) => element.id === 'boson-ptt-status')?.textContent ?? '';
+  assert.match(status, /Microphone permission was denied/);
+  assert.doesNotMatch(status, /secret-bearing|Denied by user/);
+  const button = elements.find((element) => element.textContent === 'Hold to talk');
+  assert.equal(button?.attributes.get('aria-pressed'), 'false', 'failed permission startup restores idle control state');
+});
+
+test('rejected local begin stops the mic, clears pressed state and allows a retry', async () => {
+  let beginCalls = 0;
+  let stopCalls = 0;
+  let clearTimeoutCalls = 0;
+  const fetcher = (async (input: RequestInfo | URL) => {
+    if (String(input) === '/boson-ptt/status') return Response.json({ available: true });
+    if (String(input) === '/boson-ptt/begin') {
+      beginCalls += 1;
+      return Response.json({ available: false, error: 'Boson voice is not configured; local village audio remains available.' }, { status: 503 });
+    }
+    return Response.json({ cancelled: true });
+  }) as typeof fetch;
+  const { documentStub, elements, fireDocument } = await setupBrowser(async () => ({
+    getTracks: () => [{ stop: () => { stopCalls += 1; } }],
+  }), fetcher, {
+    setTimeout: (() => 7 as never) as typeof setTimeout,
+    clearTimeout: (() => { clearTimeoutCalls += 1; }) as typeof clearTimeout,
+  });
+  await import('./viewer-ptt.js?keyboard-begin-rejection-reset');
+  await tick();
+  const button = elements.find((element) => element.id === 'boson-ptt')?.children[1];
+  assert.ok(button);
+
+  fireDocument('keydown', { code: 'KeyP', target: documentStub.body, repeat: false });
+  await tick();
+  await tick();
+  assert.equal(stopCalls, 1);
+  assert.equal(button.attributes.get('aria-pressed'), 'false');
+  assert.equal(button.textContent, 'Hold to talk');
+  assert.equal(clearTimeoutCalls, 1);
+  assert.match(elements.find((element) => element.id === 'boson-ptt-status')?.textContent ?? '', /Boson voice is not configured/);
+
+  fireDocument('keydown', { code: 'KeyP', target: documentStub.body, repeat: false });
+  await tick();
+  await tick();
+  assert.equal(beginCalls, 2, 'a rejected begin does not leave the client unable to retry');
+  assert.equal(button.attributes.get('aria-pressed'), 'false');
+});
 
 test('held PTT release before permission resolves stops the late microphone stream without starting a turn', async () => {
   let allowMic!: (stream: unknown) => void;
