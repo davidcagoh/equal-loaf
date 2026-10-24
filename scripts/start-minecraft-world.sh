@@ -7,6 +7,7 @@ mkdir -p "$MC_CACHE_DIR"
 MC_CACHE_DIR="$(cd "$MC_CACHE_DIR" && pwd)"
 readonly MC_CACHE_DIR
 readonly SERVER_JAR="$MC_CACHE_DIR/server-${MC_VERSION}.jar"
+readonly PROJECT_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 
 if [[ ! -f "$SERVER_JAR" ]]; then
   echo "Minecraft server is not prepared. Run scripts/prepare-minecraft-world.sh first." >&2
@@ -16,6 +17,19 @@ fi
 if ! grep -qx 'eula=true' "$MC_CACHE_DIR/eula.txt" 2>/dev/null; then
   echo "Minecraft server EULA has not been accepted. Review the EULA at https://aka.ms/MinecraftEULA and set eula=true in $MC_CACHE_DIR/eula.txt yourself." >&2
   exit 2
+fi
+
+# Stage the first-boot pack before Minecraft creates a fresh world. The pack
+# sets the global spawn inside the pinned vanilla village; existing saves are
+# left untouched and must be reset explicitly to adopt the new preset.
+if [[ ! -f "$MC_CACHE_DIR/world/level.dat" ]]; then
+  readonly VILLAGE_PACK="$PROJECT_ROOT/config/minecraft/world-packs/boson-village-spawn"
+  if [[ ! -f "$VILLAGE_PACK/pack.mcmeta" ]]; then
+    echo "Village spawn datapack is missing: $VILLAGE_PACK" >&2
+    exit 1
+  fi
+  mkdir -p "$MC_CACHE_DIR/world/datapacks"
+  command cp -rf "$VILLAGE_PACK" "$MC_CACHE_DIR/world/datapacks/"
 fi
 
 if [[ -n "${JAVA_BIN:-}" ]]; then

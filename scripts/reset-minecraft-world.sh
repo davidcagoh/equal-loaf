@@ -54,4 +54,4 @@ if [[ -d "$world_dir" ]]; then
 fi
 
 command cp -f "$SCRIPT_DIR/../config/minecraft/server.properties" "$MC_CACHE_DIR/server.properties"
-echo "Restored the pinned Minecraft 1.21.11 test settings. Start the world with scripts/start-minecraft-world.sh."
+echo "Restored the pinned Minecraft 1.21.11 plains-village settings (seed 244). Start the world with scripts/start-minecraft-world.sh."

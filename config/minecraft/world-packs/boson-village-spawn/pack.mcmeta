@@ -1,0 +1,7 @@
+{
+  "pack": {
+    "description": "Boson: place new players inside the seed 244 plains village",
+    "min_format": [94, 1],
+    "max_format": [94, 1]
+  }
+}

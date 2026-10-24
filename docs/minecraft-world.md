@@ -8,7 +8,7 @@ The world bootstrap targets Minecraft Java 1.21.11, which is on Mineflayer's tes
 2. Run `bash scripts/prepare-minecraft-world.sh`. This writes the server jar, checksum metadata, loopback-only server settings, and an `eula=false` file.
 3. Review the [Minecraft EULA](https://aka.ms/MinecraftEULA). If you agree to it, set the local cache's `eula.txt` to `eula=true`. The current local cache has been accepted by the operator; a new machine must review and accept it separately.
 4. Run `bash scripts/start-minecraft-world.sh`. The server listens only on `127.0.0.1`, uses offline mode for this local test, peaceful difficulty, and a pinned seed. Do not expose this server to a network.
-5. Stop the foreground server with Ctrl+C. Run `bash scripts/reset-minecraft-world.sh` to restore the canonical settings and move the prior world into a timestamped backup.
+5. Stop the foreground server with Ctrl+C. Run `bash scripts/reset-minecraft-world.sh` to restore the canonical settings and move the prior world into a timestamped backup. The next start stages the local village-spawn datapack before Minecraft generates the fresh world.
 
 ## One-command village demo
 
@@ -24,7 +24,7 @@ The launcher does not prepare or download server files, edit EULA acceptance, st
 
 `BOSON_EXPLORER_VIEWER_PORT` can select another unused local explorer-viewer port if 3000 is occupied; `BOSON_COMPANION_VIEWER_PORT` can change the companion's separate viewer port. (`BOSON_VIEWER_PORT` remains a compatibility alias for the explorer viewer port when starting this launcher.) If startup fails, check the last message in the launcher and its per-run logs; confirm Java 21+ is installed at the executable recorded in `boson-world.json`, the server jar and `eula=true` already exist, and no process is using ports 25565, 8001, or either selected viewer port. Missing adapter dependencies can be installed explicitly with `npm ci --prefix packages/minecraft`.
 
-The canonical preset is a superflat forest biome. Biome features are enabled to provide reachable trees on otherwise clear terrain. Once the EULA is accepted, inspect and record the generated spawn layout; adjust the seed only if that evidence shows it misses the intended scene. The runtime bot-join and observation gate is validated by the Minecraft adapter task.
+The canonical preset is vanilla normal terrain on seed `244`, which generates a plains village immediately around world origin. A fresh 1.21.11 trial located the plains village at `[64, ~, 16]` and generated nine native `minecraft:villager` entities. The local `boson-village-spawn` datapack sets world spawn at `[69, 69, 19]` on an open village path and sets `respawn_radius` to `0`. On a fresh boot, the datapack auto-loaded and a new player spawned at `[69.5, 68.9375, 19.5]` on the path surface with clear headroom; ten native villagers were visible within the client view, with the nearest observed 11.4 blocks away. The villagers' exact count and positions change as their vanilla routines run. The pack does not summon or replace villagers. Existing worlds retain their original terrain and spawn: stop the server, run `bash scripts/reset-minecraft-world.sh` (which backs up the old world), then launch the fresh preset. Reset and first-boot generation are local-only; the datapack ships with this repository.
 
 `BOSON_MC_DIR` can point the scripts to a different cache directory. The default is `${XDG_CACHE_HOME:-$HOME/.cache}/boson/minecraft-1.21.11`. The directory contains the server jar, world, configuration, and reset backups.
 

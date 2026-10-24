@@ -84,7 +84,7 @@ fi
 cat > "$MC_CACHE_DIR/boson-world.json" <<EOF
 {
   "minecraftVersion": "${MC_VERSION}",
-  "seed": "20261023",
+  "seed": "244",
   "serverJar": "$(basename "$server_jar")",
   "serverJarSha1": "${expected_sha1}",
   "javaExecutable": "${JAVA_EXECUTABLE}",
