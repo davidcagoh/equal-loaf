@@ -54,6 +54,8 @@ export interface ResidentIntentContext {
   topic: VillageTopic;
   locationId: string;
   tick: number;
+  /** Optional identity of the in-range utterance that should ground this response. */
+  heardClaimEventId?: string;
 }
 
 export interface SelectedResidentIntent {
@@ -110,6 +112,7 @@ interface AuthoredBeat {
   requiredTopics: readonly VillageTopic[];
   requiredLocation: string;
   requiredFactIds: readonly FactId[];
+  requiredHeardClaim?: { sourceId: string; factId: FactId };
   minimumTrust: number;
   cooldownTicks: number;
   expiresInTicks: number;
@@ -161,6 +164,14 @@ const AUTHORED_BEATS: readonly AuthoredBeat[] = [
     lineSummary: 'A warm, brief response focused on bakery work.',
     action: { kind: 'continue_routine', waypointId: 'bakery-hearth' }, lineId: 'pip-guarded-bakery-reply',
   },
+  {
+    id: 'pip-heard-route-from-tobin', residentId: 'pip', priority: 30,
+    requiredIntent: ['greet'], requiredTopics: ['general'],
+    requiredLocation: 'bakery-hearth', requiredFactIds: [], requiredHeardClaim: { sourceId: 'tobin', factId: 'route-mark' }, minimumTrust: 0,
+    cooldownTicks: 3_000, expiresInTicks: 5_000, modelSelectableLine: true,
+    lineSummary: 'A reply that attributes a route claim to a neighbor without treating it as verified.',
+    action: { kind: 'look_at_player' }, lineId: 'pip-heard-route-from-tobin',
+  },
 ];
 
 const AUTHORED_LINES = Object.freeze({
@@ -169,6 +180,7 @@ const AUTHORED_LINES = Object.freeze({
   'mira-garden-help-reply': 'I could use help checking the seedlings. Stay on the garden path, please.',
   'tobin-guarded-route-reply': 'The map shows the route. It does not tell me who drove the cart.',
   'pip-guarded-bakery-reply': 'The oven needs watching. There is warm bread when the work is done.',
+  'pip-heard-route-from-tobin': 'Tobin marked a flour cart path on his map. I heard him say it, but I have not checked that route myself.',
 } as const);
 
 function clampTrust(value: number): number {
@@ -218,6 +230,12 @@ export function reduceVillageObservation(state: VillageCognitionState, observati
       residents[residentId] = { ...resident, trust: clampTrust(resident.trust + 1) };
       continue;
     }
+    if (observation.type === 'resident.utterance' && observation.claimedFactId !== undefined) {
+      const speaker = state.residents[observation.speakerId];
+      const fact = VILLAGE_FACTS[observation.claimedFactId as FactId];
+      if (!speaker || !PUBLIC_OBSERVABLE_FACTS.includes(observation.claimedFactId as FactId) ||
+        !speaker.knownFactIds.includes(observation.claimedFactId) || !fact || fact.topic !== observation.topic) continue;
+    }
     const claim: HeardClaim = {
       eventId: observation.eventId,
       sourceId: observation.type === 'player.intent' ? 'player' : observation.speakerId,
@@ -244,7 +262,9 @@ export function getResidentKnowledgeContext(
     factId in VILLAGE_FACTS && isFactDisclosable(factId, state, resident, scene));
   const topics = [...new Set(factIds.map((factId) => VILLAGE_FACTS[factId].topic))];
   const responseOptions = AUTHORED_BEATS
-    .filter((beat) => beat.residentId === residentId && beat.modelSelectableLine && beat.requiredFactIds.every((factId) => factIds.includes(factId)))
+    .filter((beat) => beat.residentId === residentId && beat.modelSelectableLine && beat.requiredFactIds.every((factId) => factIds.includes(factId)) &&
+      (!beat.requiredHeardClaim || hasHeardClaim(resident, beat.requiredHeardClaim, scene?.heardClaimEventId)) &&
+      (!beat.requiredHeardClaim || !scene || scene.locationId === beat.requiredLocation))
     .map(({ lineId, lineSummary, requiredIntent, requiredTopics }) => ({
       lineId, summary: lineSummary, allowedIntents: requiredIntent, topics: requiredTopics,
     }));
@@ -257,6 +277,15 @@ export function getResidentKnowledgeContext(
     responseOptions,
     relationship: relationshipBand(resident.trust),
   };
+}
+
+function hasHeardClaim(
+  resident: ResidentCognition,
+  required: NonNullable<AuthoredBeat['requiredHeardClaim']>,
+  eventId?: string,
+): boolean {
+  return resident.heardClaims.some((claim) => claim.sourceId === required.sourceId && claim.claimedFactId === required.factId &&
+    (eventId === undefined || claim.eventId === eventId));
 }
 
 function isFactDisclosable(
@@ -317,6 +346,7 @@ function eligibleBeats(state: VillageCognitionState, context: ResidentIntentCont
       beat.requiredIntent.includes(context.playerIntent) && beat.requiredTopics.includes(context.topic) &&
       beat.requiredLocation === context.locationId && beat.minimumTrust <= resident.trust &&
       beat.requiredFactIds.every((factId) => resident.knownFactIds.includes(factId)) &&
+      (!beat.requiredHeardClaim || hasHeardClaim(resident, beat.requiredHeardClaim, context.heardClaimEventId)) &&
       (lastCompleted === undefined || context.tick - lastCompleted >= beat.cooldownTicks);
   });
 }

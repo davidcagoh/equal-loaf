@@ -38,6 +38,78 @@ test('duplicate observation events are idempotent across all recipients', () => 
   assert.equal(twice.residents.tobin?.heardClaims.length, 0);
 });
 
+test('an in-range resident attributes a public claim and later selects its authored reply without verifying it', () => {
+  const initial = createVillageCognitionState();
+  const context = {
+    residentId: 'pip', playerIntent: 'greet' as const, topic: 'general' as const,
+    locationId: 'bakery-hearth', tick: 10,
+  };
+  const before = selectResidentIntent(initial, context, 11);
+  assert.equal(before?.beatId, 'pip-guarded-bakery-reply');
+
+  const publicUtterance: VillageObservation = {
+    type: 'resident.utterance', eventId: 'tobin-route-1', tick: 1,
+    recipientIds: ['pip'], speakerId: 'tobin', topic: 'route', claimedFactId: 'route-mark',
+  };
+  const heard = reduceVillageObservation(initial, publicUtterance);
+  assert.equal(heard.residents.pip?.heardClaims[0]?.sourceId, 'tobin');
+  assert.equal(heard.residents.pip?.heardClaims[0]?.claimedFactId, 'route-mark');
+  assert.deepEqual(heard.residents.pip?.knownFactIds, initial.residents.pip?.knownFactIds);
+  assert.equal(heard.residents.pip?.knownFactIds.includes('route-mark'), false);
+  assert.equal(heard.residents.mira?.heardClaims.length, 0);
+
+  const intent = selectResidentIntent(heard, { ...context, heardClaimEventId: 'tobin-route-1' }, 11);
+  assert.equal(intent?.beatId, 'pip-heard-route-from-tobin');
+  assert.notDeepEqual(intent?.action, before?.action);
+  assert.deepEqual(intent?.action, { kind: 'look_at_player' });
+  assert.deepEqual(intent?.speech, { kind: 'authored_line', lineId: 'pip-heard-route-from-tobin' });
+  assert.equal(authoredLine(intent?.speech.lineId ?? ''), 'Tobin marked a flour cart path on his map. I heard him say it, but I have not checked that route myself.');
+
+  const responseContext = getResidentKnowledgeContext(heard, 'pip', { ...context, heardClaimEventId: 'tobin-route-1' });
+  assert.ok(responseContext.responseOptions.some(({ lineId }) => lineId === 'pip-heard-route-from-tobin'));
+  const response = validateSemanticResponse({
+    playerIntent: 'greet', topic: 'general', lineId: 'pip-heard-route-from-tobin',
+  }, { residentId: 'pip', context: responseContext });
+  assert.ok(response);
+  const modelSelected = selectResidentIntent(heard, { ...context, heardClaimEventId: 'tobin-route-1' }, 11, response);
+  assert.equal(modelSelected?.beatId, 'pip-heard-route-from-tobin');
+  assert.deepEqual(modelSelected?.action, { kind: 'look_at_player' });
+  assert.equal(getResidentKnowledgeContext(heard, 'pip', { ...context, heardClaimEventId: 'missing-event' }).responseOptions
+    .some(({ lineId }) => lineId === 'pip-heard-route-from-tobin'), false);
+  assert.equal(getResidentKnowledgeContext(heard, 'pip', { ...context, locationId: 'market-well' }).responseOptions
+    .some(({ lineId }) => lineId === 'pip-heard-route-from-tobin'), false);
+});
+
+test('repeated public claims remain attributed hearsay and private or unauthored claims are rejected', () => {
+  const initial = createVillageCognitionState();
+  const first = reduceVillageObservation(initial, {
+    type: 'resident.utterance', eventId: 'route-claim-1', tick: 1,
+    recipientIds: ['pip'], speakerId: 'tobin', topic: 'route', claimedFactId: 'route-mark',
+  });
+  const repeated = reduceVillageObservation(first, {
+    type: 'resident.utterance', eventId: 'route-claim-2', tick: 2,
+    recipientIds: ['pip'], speakerId: 'tobin', topic: 'route', claimedFactId: 'route-mark',
+  });
+  const forged = reduceVillageObservation(repeated, {
+    type: 'resident.utterance', eventId: 'private-claim', tick: 3,
+    recipientIds: ['pip'], speakerId: 'mira', topic: 'garden', claimedFactId: 'mira-sighting',
+  });
+  const unauthoredSource = reduceVillageObservation(forged, {
+    type: 'resident.utterance', eventId: 'unsupported-route-claim', tick: 4,
+    recipientIds: ['pip'], speakerId: 'mira', topic: 'route', claimedFactId: 'route-mark',
+  });
+
+  assert.equal(unauthoredSource.residents.pip?.heardClaims.length, 2);
+  assert.equal(unauthoredSource.residents.pip?.knownFactIds.includes('route-mark'), false);
+  assert.equal(unauthoredSource.residents.pip?.knownFactIds.includes('mira-sighting'), false);
+  assert.equal(unauthoredSource.residents.pip?.heardClaims.some(({ eventId }) => eventId === 'private-claim'), false);
+  assert.equal(unauthoredSource.residents.pip?.heardClaims.some(({ eventId }) => eventId === 'unsupported-route-claim'), false);
+  assert.equal(selectResidentIntent(unauthoredSource, {
+    residentId: 'pip', playerIntent: 'ask_about_known_topic', topic: 'flour', locationId: 'bakery-hearth',
+    tick: 10, heardClaimEventId: 'private-claim',
+  }, 11), null);
+});
+
 test('only public observable facts can become verified knowledge through direct observation', () => {
   const initial = createVillageCognitionState();
   const sawWork = reduceVillageObservation(initial, { type: 'world.fact_observed', eventId: 'saw-seedlings', tick: 1, recipientIds: ['tobin'], factId: 'seedlings-safe' });
