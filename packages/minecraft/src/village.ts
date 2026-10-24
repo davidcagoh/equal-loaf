@@ -24,6 +24,7 @@ import {
   type VillagePttAck,
   type VillagePttBeginContext,
   type VillagePttCommand,
+  type VillageDialogueEvent,
 } from './village-event.ts';
 import { villageDialogue, villageMysteryDialogue, villageProfiles } from './village-profiles.ts';
 import { createAmbientUtteranceObservation, nextResidentDialogueTurn, type ResidentDialogueCursor } from './village-dialogue-scheduler.ts';
@@ -37,6 +38,8 @@ import {
   selectPttResident,
   type EncounterResident,
 } from './village-encounters.ts';
+import { createEqualLoafState } from './village-short-scene.ts';
+import { completeEqualLoafPttTurn } from './village-ptt-scene-integration.ts';
 
 // Optional explicit env file keeps credentials in the local launcher process only.
 if (process.env.BOSON_AI_ENV_FILE) process.loadEnvFile(process.env.BOSON_AI_ENV_FILE);
@@ -61,6 +64,7 @@ const awarenessTimers: ReturnType<typeof setInterval>[] = [];
 const activePttTurns = new Map<string, { residentId: string; startedAt: number; expiresAt: number; beginAck: VillagePttAck }>();
 const resolvedPttTurns = new Map<string, 'cancelled' | 'completed' | 'expired'>();
 const cognitionState = { current: createVillageCognitionState() };
+let equalLoafSceneState = createEqualLoafState();
 const RESIDENT_HEARING_RADIUS = 12;
 const PTT_TURN_TTL_MS = 30_000;
 const MAX_ACTIVE_PTT_TURNS = 8;
@@ -237,9 +241,14 @@ function emitResidentResponse(turnId: string, intent: SelectedResidentIntent, li
     line,
     position: { x: position.x, y: position.y, z: position.z },
   });
+  return emitVillageDialogueEvent(event);
+}
+
+function emitVillageDialogueEvent(event: VillageDialogueEvent): string | null {
+  if (!event.eventId) return null;
   // PTT dialogue stays out of Minecraft chat/server logs; only the transient viewer event carries it.
   process.stdout.write(`${JSON.stringify(event)}\n`);
-  return eventId;
+  return event.eventId;
 }
 
 function completePttTurn(command: Extract<VillagePttCommand, { type: 'ptt.complete' }>): void {
@@ -313,6 +322,35 @@ function completePttTurn(command: Extract<VillagePttCommand, { type: 'ptt.comple
       recipientIds: [active.residentId],
       behavior: 'respectful_exchange',
     });
+  }
+
+  if (validatedResponse?.lineId.startsWith('equal-loaf.')) {
+    const completion = completeEqualLoafPttTurn({
+      state: cognitionState.current,
+      sceneState: equalLoafSceneState,
+      turnId: command.turnId,
+      residentId: profile.id,
+      residentName: profile.username,
+      locationId,
+      tick: now,
+      semanticResponse: validatedResponse,
+      explorerPosition: explorer,
+      position: targetBot.entity.position,
+      heardResidentIds: getResidentsWithinHearingRadius(targetBot.entity.position, currentEncounterResidents()),
+      applyAction: applyResidentAction,
+      emitDialogue: emitVillageDialogueEvent,
+    });
+    if (completion.status !== 'accepted') {
+      resolvedPttTurns.set(command.turnId, 'completed');
+      sendPttAck({ version: 1, type: 'ptt.ack', phase: 'complete', turnId: command.turnId, status: completion.status });
+      return;
+    }
+    cognitionState.current = completion.state;
+    equalLoafSceneState = completion.sceneState;
+    resolvedPttTurns.set(command.turnId, 'completed');
+    sendPttAck({ version: 1, type: 'ptt.ack', phase: 'complete', turnId: command.turnId, status: 'accepted',
+      residentId: profile.id, speakerName: profile.username, lineId: completion.lineId, eventId: completion.eventId });
+    return;
   }
 
   const localScene = {

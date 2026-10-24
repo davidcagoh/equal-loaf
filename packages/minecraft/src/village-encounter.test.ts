@@ -76,7 +76,10 @@ test('an ordinary routine stop selects the resident authored greeting instead of
   const knowledge = getResidentKnowledgeContext(state, profile.id, {
     residentId: profile.id, playerIntent: 'greet', topic: 'general', locationId: 'market-well', tick: 10_000,
   });
-  assert.deepEqual(knowledge.responseOptions.map(({ lineId }) => lineId), ['mira-routine-greeting']);
+  assert.deepEqual(knowledge.responseOptions.map(({ lineId }) => lineId), [
+    'mira-routine-greeting',
+    'equal-loaf.anna.garden-workers',
+  ]);
   assert.equal(knowledge.factIds.includes('mira-sighting'), false);
 });
 

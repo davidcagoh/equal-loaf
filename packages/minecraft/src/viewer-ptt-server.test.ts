@@ -147,10 +147,12 @@ test('HTTP begin and complete carry a safe choice over UDS and resolve private s
       'mira-guarded-garden-reply',
       'mira-garden-help-reply',
       'mira-routine-greeting',
+      'equal-loaf.anna.garden-workers',
     ]);
     assert.equal(setup.available, true);
     assert.equal(JSON.stringify(setup).includes('mira-sighting'), false);
     assert.equal(JSON.stringify(setup).includes('mira-sighting-disclosure'), false);
+    assert.equal(JSON.stringify(setup).includes('equal-loaf-inclusion'), false);
     assert.equal(providerCalls, 1);
 
     const completed = await originalFetch(`${origin}/boson-ptt/complete`, {

@@ -44,6 +44,7 @@ interface ObservationBase {
 export type VillageObservation =
   | (ObservationBase & { type: 'player.intent'; intent: PlayerIntent; topic: VillageTopic; claimedFactId?: string })
   | (ObservationBase & { type: 'resident.utterance'; speakerId: string; topic: VillageTopic; claimedFactId?: string })
+  | (ObservationBase & { type: 'resident.fact_disclosed'; speakerId: string; factId: string })
   | (ObservationBase & { type: 'world.fact_observed'; factId: string })
   | (ObservationBase & { type: 'player.behavior'; behavior: 'respectful_exchange' })
   | { type: 'beat.completed'; eventId: string; tick: number; residentId: string; beatId: string };
@@ -107,10 +108,24 @@ export const VILLAGE_FACTS = Object.freeze({
   'route-mark': { topic: 'route', text: `${RESIDENT_DISPLAY_NAMES.tobin}’s map marks a flour cart route by the bell-house path, but not its driver.` },
   'pip-denial': { topic: 'bakery', text: `${RESIDENT_DISPLAY_NAMES.pip} says he stayed in the bakery all night and the ovens were cold until morning.` },
   'pip-contradiction': { topic: 'bakery', text: `${RESIDENT_DISPLAY_NAMES.pip} later says he returned to the bakery after dawn and relit the hearth.` },
+  'equal-loaf-thomas-claim': { topic: 'general', text: `${RESIDENT_DISPLAY_NAMES.pip} says he set aside one loaf for every household.` },
+  'equal-loaf-household-count': { topic: 'route', text: `${RESIDENT_DISPLAY_NAMES.tobin} counts one share for each household on the village map.` },
+  'equal-loaf-garden-workers': { topic: 'garden', text: `${RESIDENT_DISPLAY_NAMES.mira} says the garden workers are not on the household list.` },
 } as const satisfies Record<string, { topic: VillageTopic; text: string }>);
 
 type FactId = keyof typeof VILLAGE_FACTS;
 const PUBLIC_OBSERVABLE_FACTS: readonly FactId[] = ['silent-bell', 'seedlings-safe', 'flour-ledger', 'route-mark'];
+const HEARABLE_CLAIM_FACTS: readonly FactId[] = [
+  ...PUBLIC_OBSERVABLE_FACTS,
+  'equal-loaf-thomas-claim',
+  'equal-loaf-household-count',
+  'equal-loaf-garden-workers',
+];
+const SCENE_FACT_OWNERS = {
+  'equal-loaf-thomas-claim': 'pip',
+  'equal-loaf-household-count': 'tobin',
+  'equal-loaf-garden-workers': 'mira',
+} as const;
 
 export function isPublicObservableFactId(value: string): value is FactId {
   return value in VILLAGE_FACTS && PUBLIC_OBSERVABLE_FACTS.includes(value as FactId);
@@ -130,6 +145,7 @@ interface AuthoredBeat {
   cooldownTicks: number;
   expiresInTicks: number;
   modelSelectableLine: boolean;
+  sceneOnly?: boolean;
   lineSummary: string;
   action: ResidentAction;
   lineId: string;
@@ -210,6 +226,34 @@ const AUTHORED_BEATS: readonly AuthoredBeat[] = [
     cooldownTicks: RESPONSE_COOLDOWN_TICKS, expiresInTicks: 5_000, modelSelectableLine: true,
     lineSummary: 'A brief everyday greeting while Thomas walks between the bakery and market.',
     action: { kind: 'look_at_player' }, lineId: 'pip-routine-greeting',
+  },
+  {
+    id: 'equal-loaf-thomas-welcome', residentId: 'pip', priority: 30,
+    requiredIntent: ['greet'], requiredTopics: ['general'], requiredLocation: '*', requiredFactIds: [], minimumTrust: 0,
+    cooldownTicks: RESPONSE_COOLDOWN_TICKS, expiresInTicks: 5_000, modelSelectableLine: true, sceneOnly: true,
+    lineSummary: 'A friendly welcome and Thomas’s account of how he set aside bread for the village.',
+    action: { kind: 'look_at_player' }, lineId: 'equal-loaf.thomas.welcome',
+  },
+  {
+    id: 'equal-loaf-james-household-map', residentId: 'tobin', priority: 30,
+    requiredIntent: ['ask_about_known_topic'], requiredTopics: ['route'], requiredLocation: '*', requiredFactIds: [], minimumTrust: 0,
+    cooldownTicks: RESPONSE_COOLDOWN_TICKS, expiresInTicks: 5_000, modelSelectableLine: true, sceneOnly: true,
+    lineSummary: 'James explains that the map count uses households as its unit.',
+    action: { kind: 'look_at_player' }, lineId: 'equal-loaf.james.household-map',
+  },
+  {
+    id: 'equal-loaf-anna-garden-workers', residentId: 'mira', priority: 30,
+    requiredIntent: ['ask_about_known_topic'], requiredTopics: ['garden'], requiredLocation: '*', requiredFactIds: [], minimumTrust: 0,
+    cooldownTicks: RESPONSE_COOLDOWN_TICKS, expiresInTicks: 5_000, modelSelectableLine: true, sceneOnly: true,
+    lineSummary: 'Anna describes the garden workers’ contribution and their request for privacy.',
+    action: { kind: 'look_at_player' }, lineId: 'equal-loaf.anna.garden-workers',
+  },
+  {
+    id: 'equal-loaf-thomas-close', residentId: 'pip', priority: 30,
+    requiredIntent: ['ask_for_help'], requiredTopics: ['bakery'], requiredLocation: '*', requiredFactIds: [], minimumTrust: 0,
+    cooldownTicks: RESPONSE_COOLDOWN_TICKS, expiresInTicks: 5_000, modelSelectableLine: true, sceneOnly: true,
+    lineSummary: 'Thomas closes the bread conversation with an ordinary invitation to share the table.',
+    action: { kind: 'look_at_player' }, lineId: 'equal-loaf.thomas.ordinary-close',
   },
   {
     id: 'pip-heard-route-from-tobin', residentId: 'pip', priority: 30,
@@ -295,6 +339,18 @@ export function reduceVillageObservation(state: VillageCognitionState, observati
     return { processedEventIds, residents };
   }
 
+  if (observation.type === 'resident.fact_disclosed') {
+    const owner = SCENE_FACT_OWNERS[observation.factId as keyof typeof SCENE_FACT_OWNERS];
+    if (owner !== observation.speakerId || !(observation.factId in VILLAGE_FACTS)) return { processedEventIds, residents };
+    for (const residentId of observation.recipientIds) {
+      const resident = residents[residentId];
+      if (resident && residentId === owner) {
+        residents[residentId] = { ...resident, knownFactIds: [...new Set([...resident.knownFactIds, observation.factId])] };
+      }
+    }
+    return { processedEventIds, residents };
+  }
+
   for (const residentId of observation.recipientIds) {
     const resident = residents[residentId];
     if (!resident) continue;
@@ -310,7 +366,7 @@ export function reduceVillageObservation(state: VillageCognitionState, observati
     if (observation.type === 'resident.utterance' && observation.claimedFactId !== undefined) {
       const speaker = state.residents[observation.speakerId];
       const fact = VILLAGE_FACTS[observation.claimedFactId as FactId];
-      if (!speaker || !PUBLIC_OBSERVABLE_FACTS.includes(observation.claimedFactId as FactId) ||
+      if (!speaker || !HEARABLE_CLAIM_FACTS.includes(observation.claimedFactId as FactId) ||
         !speaker.knownFactIds.includes(observation.claimedFactId) || !fact || fact.topic !== observation.topic) continue;
     }
     const claim: HeardClaim = {
@@ -448,12 +504,13 @@ export function resolvePttResidentIntent(
   return { semanticResponse, context, intent };
 }
 
-function eligibleBeats(state: VillageCognitionState, context: ResidentIntentContext): readonly AuthoredBeat[] {
+function eligibleBeats(state: VillageCognitionState, context: ResidentIntentContext, includeSceneOnly = false): readonly AuthoredBeat[] {
   const resident = state.residents[context.residentId];
   if (!resident || (resident.lastResponseTick !== null && context.tick - resident.lastResponseTick < RESPONSE_COOLDOWN_TICKS)) return [];
   return AUTHORED_BEATS.filter((beat) => {
     const lastCompleted = resident.completedBeatTicks[beat.id];
     return beat.residentId === context.residentId &&
+      (includeSceneOnly || !beat.sceneOnly) &&
       beat.requiredIntent.includes(context.playerIntent) && beat.requiredTopics.includes(context.topic) &&
       (beat.requiredLocation === '*' || beat.requiredLocation === context.locationId) && beat.minimumTrust <= resident.trust &&
       beat.requiredFactIds.every((factId) => resident.knownFactIds.includes(factId)) &&
@@ -471,7 +528,8 @@ export function selectResidentIntent(
 ): SelectedResidentIntent | null {
   const resident = state.residents[context.residentId];
   if (!resident || !PLAYER_INTENTS.includes(context.playerIntent) || !VILLAGE_TOPICS.includes(context.topic)) return null;
-  const candidates = eligibleBeats(state, context).sort((left, right) => right.priority - left.priority || left.id.localeCompare(right.id));
+  const includeSceneOnly = semanticResponse?.lineId.startsWith('equal-loaf.') === true;
+  const candidates = eligibleBeats(state, context, includeSceneOnly).sort((left, right) => right.priority - left.priority || left.id.localeCompare(right.id));
   if (candidates.length === 0) return null;
   const fallbackBeat = candidates.reduce((selected, candidate) => {
     if (!selected || candidate.priority > selected.priority) return candidate;
@@ -508,7 +566,7 @@ export function validateResidentIntent(state: VillageCognitionState, intent: Sel
   if (intent.allowedFactIds.length !== allowedFactIds.length || intent.allowedFactIds.some((factId, index) => factId !== allowedFactIds[index])) return false;
   const beat = AUTHORED_BEATS.find(({ id, residentId }) => id === intent.beatId && residentId === intent.residentId);
   if (!beat || intent.expiresAtTick !== intent.selectedAtTick + beat.expiresInTicks || context.tick < intent.selectedAtTick) return false;
-  if (!eligibleBeats(state, { ...context, tick: intent.selectedAtTick }).some(({ id }) => id === beat.id)) return false;
+  if (!eligibleBeats(state, { ...context, tick: intent.selectedAtTick }, Boolean(beat.sceneOnly)).some(({ id }) => id === beat.id)) return false;
   if (intent.action.kind !== beat.action.kind || ('waypointId' in beat.action && intent.action.waypointId !== beat.action.waypointId)) return false;
   return intent.speech.kind === 'authored_line' && intent.speech.lineId === beat.lineId;
 }

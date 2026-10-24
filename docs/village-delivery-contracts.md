@@ -27,7 +27,7 @@ For the isolated story scene, use existing intent/topic and cognition observatio
 2. `.28.17.6` closes only after focused fixed-encounter tests and review/commit. It proves reachability logic and preserved spatial predicates, not live speech.
 3. `.28.17.7` closes on a rendered no-mic preflight and clean owned-file review/commit. Human PTT evidence is tracked separately; `.17.8.1` already records audible authored TTS but does not prove Realtime semantic response or release timing.
 4. `.28.17.10` integrates the simplified audio UI after `.17.9` and `.17.9.1`; it is the main-viewer audio integration gate.
-5. `.28.26` waits for the isolated scene and integration contract, then verifies production no-provider event/cognition flow and rendered smoke.
+5. `.28.26` waits for the isolated scene and integration contract, then verifies the production no-provider PTT/IPC/cognition/event path with fixtures. Do not restart a user-owned runtime. Scene rendering and the complete live journey remain in `.28.27`, after `.17.10` and the audio-owned `.17.13` client line-ID fix land.
 6. `.28.27` is the separate complete live journey gate. `.28.1` walkthrough capture follows it. Kitchen design/implementation and commercial validation remain downstream of demonstrated MVP evidence, not prerequisites for village work.
 
 ## Review and runtime boundaries

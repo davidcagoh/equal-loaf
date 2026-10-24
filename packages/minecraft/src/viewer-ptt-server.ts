@@ -91,7 +91,7 @@ export function isPttBeginAck(value: unknown, turnId: string): value is PttBegin
     if (!raw || typeof raw !== 'object' || Array.isArray(raw)) return false;
     const option = raw as Record<string, unknown>;
     return objectHasExactKeys(option, ['lineId', 'summary', 'allowedIntents', 'topics'])
-      && safeString(option.lineId, 128) && /^[A-Za-z0-9:_-]+$/.test(option.lineId)
+      && safeString(option.lineId, 128) && /^[A-Za-z0-9:_.-]+$/.test(option.lineId)
       && safeString(option.summary, 160)
       && Array.isArray(option.allowedIntents) && option.allowedIntents.length > 0 && option.allowedIntents.length <= 8
       && option.allowedIntents.every((intent) => typeof intent === 'string' && ALLOWED_INTENTS.has(intent))
