@@ -15,7 +15,7 @@ Make the village react to what its residents can observe and remember. Each resi
 Represent cognition as local, explicit data, not free-form model state:
 
 - **Goal:** one ordinary near-term purpose, such as Mira protecting the seedlings or Tobin maintaining a reliable route map. Goals explain routine choices; a beat can temporarily suspend one and then expire back to it.
-- **Private knowledge:** authored facts tagged by who knows them, confidence, and disclosure conditions. Observation events may add a fact only when the resident is a participant or within a specified place/range/time window. Hidden story truth is never copied into every resident's state.
+- **Private knowledge:** separate canonical world facts from resident memories of claims. Authored truth stays in a protected story ledger; each resident's knowledge contains only witnessed facts or heard claims, with source, confidence, time, and disclosure conditions. Hearing an allegation records “resident X said Y,” not that Y is verified. Observation events update only residents who were participants or in the specified audibility/range/time window. Hidden story truth is never copied into every resident's state.
 - **Relationship:** small bounded values or named bands per resident pair/player (e.g. unfamiliar, cautious, trusted), changed only by authored local events. No model decides relationship state.
 - **Memory:** a compact set of observed event IDs and completed beat IDs, to prevent repetition and support later callbacks. Keep it in memory for the MVP; save/load is a later question.
 - **Beat intent:** authored ID, participants, location, prerequisites, knowledge required, expiry/cooldown, dialogue intent, and one or more allowed actions. Select deterministically from eligible candidates with a seed and stable tie-break order.
@@ -24,7 +24,7 @@ One transition should have this shape:
 
 `observed event -> eligible residents' private memory update -> beat eligibility -> selected intent -> bounded action + line intent -> event emitted`
 
-Player speech is an observed event after the explicit talk control. Deliver its local semantic event to every in-earshot eligible resident independently so each can update only their own memory; prioritize the nearest eligible resident to take the immediate reply turn. Do not turn response priority into exclusive knowledge delivery. Keep speech transport, transcript/audio retention policy, and speech synthesis outside this reducer. Ambient resident events also enter the same path. Drop stale intents and re-check range, path bounds, and eligibility before applying actions.
+Player speech is an observed event after the explicit talk control and transcription. Deliver its semantic event to every in-earshot eligible resident independently so each can record only that the explorer made the claim; prioritize the nearest eligible resident to take the immediate reply turn. Do not turn response priority into exclusive knowledge delivery. Keep speech transport, transcript/audio retention policy, and speech synthesis outside this reducer. Ambient resident events also enter the same path. Apply per-resident reply cooldowns. Actor routines continue on their own cadence while an optional model request is pending; late results expire and are discarded. Drop stale intents and re-check range, path bounds, and eligibility before applying actions.
 
 ## Authored versus generative responsibility
 
@@ -34,7 +34,7 @@ Authored data owns mystery truth, who knows each clue, disclosure thresholds, be
 
 1. The explorer arrives during the residents' ordinary morning loops. Mira tends the west beds, Tobin checks the map board, and Pip works near the bakery; these routes continue without dialogue being due.
 2. An ambient beat lets the explorer overhear that Rowan's dawn bell did not ring. Later, Tobin and Pip discuss the flour ledger shortage. These facts are public clues, not a forced quest sequence.
-3. The explorer uses the explicit talk control near Mira. Every resident in earshot independently receives the semantic event; Mira is nearest and gets reply priority. Her response is guarded because the player is unfamiliar; it reflects Mira's seedling-protection goal and does not reveal her private sighting.
+3. The explorer uses the explicit talk control near Mira. Transcription yields a semantic event delivered to every eligible resident in earshot; each records that claim independently. Mira is nearest and gets reply priority. Her response is guarded because the player is unfamiliar; it reflects Mira's seedling-protection goal and does not reveal her private sighting. Residents outside range do not learn the claim.
 4. After a low-pressure exchange near Mira's garden, a locally authored trust/scene condition becomes eligible. Mira chooses to tell the explorer that she saw Pip returning by the garden path before dawn. Her movement to/within the garden and the spoken line share the same intent.
 5. A later overheard bakery exchange gives Pip's timeline contradiction. It is corroboration, not a verdict. The scene ends with residents continuing their day; no mandatory accusation, confession, or combat.
 
@@ -49,8 +49,9 @@ For component acceptance, the core reducer can be exercised with synthetic typed
 ## Acceptance
 
 - Each modeled resident has an explicit ordinary goal and private knowledge; at least one relationship value can change through authored events.
-- A resident does not use facts they have not observed or been authored to know; tests verify cross-resident knowledge isolation.
-- Independent routine movement continues while beat selection or dialogue is idle.
+- Resident knowledge distinguishes a witnessed event or heard claim from canonical world truth; tests verify claim attribution and cross-resident knowledge isolation across in-earshot and out-of-range listeners.
+- Independent routine movement continues while beat selection or dialogue is idle, and while optional model requests are pending or late.
+- In-earshot eligible residents independently receive one semantic event; the nearest eligible resident receives response priority. Per-resident cooldowns prevent repeated reactions.
 - A typed observed event can make one authored beat eligible; before/after state yields different resident behavior.
 - A selected beat determines both an allowlisted action and a bounded utterance intent; validation/failure falls back to the routine and authored line.
 - Identical initial state, event sequence, and seed produce the same beat/action/line intent.
