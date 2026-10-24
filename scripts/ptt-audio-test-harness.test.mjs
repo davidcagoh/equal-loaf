@@ -22,10 +22,24 @@ test('isolated audio harness serves production modules behind local security and
   assert.match(page, /120 characters/);
   assert.match(page, /No Minecraft world/);
   assert.doesNotMatch(page, /<iframe\b/i);
+  assert.match(page, /id="run-controls" hidden/);
+  assert.match(page, /id="enable-audio"[^>]*>Enable audio</);
+  assert.match(page, /<details id="diagnostics"/);
+  assert.match(page, /hold P or the talk button/i);
+  assert.match(page, /deriveAudioBenchOutcome/);
+  assert.doesNotMatch(page, /Reply audio enabled for this tab/);
+  assert.match(page, /id="run-controls" hidden/);
+  assert.match(page, /id="enable-audio"[^>]*>Enable audio</);
+  assert.match(page, /<details id="diagnostics"/);
+  assert.match(page, /hold P or the talk button/i);
+  assert.match(page, /deriveAudioBenchOutcome/);
+  assert.doesNotMatch(page, /Reply audio enabled for this tab/);
 
   for (const asset of [
     '/boson-ptt.js',
     '/boson-audio.js',
+    '/ptt-audio-test-view.js',
+    '/ptt-audio-test-view.js',
     '/boson-ptt-worklet.js',
     '/village-vocabulary.js',
     '/audio/spatial-voice-mixer.js',

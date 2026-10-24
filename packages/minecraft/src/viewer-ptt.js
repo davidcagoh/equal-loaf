@@ -40,7 +40,7 @@ export function startViewerPtt() {
   title.textContent = 'Talk to a nearby villager';
   const button = document.createElement('button');
   button.type = 'button';
-  button.textContent = 'Hold to talk';
+  button.textContent = 'Hold P to talk';
   button.setAttribute('aria-label', 'Hold P to talk, or hold this button; release to send');
   button.setAttribute('aria-pressed', 'false');
   const status = document.createElement('span');
@@ -72,7 +72,7 @@ export function startViewerPtt() {
     held = false;
     holdSource = null;
     button.setAttribute('aria-pressed', 'false');
-    button.textContent = 'Hold to talk';
+    button.textContent = 'Hold P to talk';
   };
   const closeSocket = (socket) => {
     if (socket && socket.readyState < WebSocket.CLOSING) socket.close(1000, 'Push-to-talk turn ended');

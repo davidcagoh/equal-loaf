@@ -88,6 +88,7 @@ test('P starts one held turn from the lab surface and keyup releases it while be
   }, fetcher);
   await import('./viewer-ptt.js?keyboard-hold-p-pending-begin');
   await tick();
+  assert.equal(elements.find((element) => element.id === 'boson-ptt')?.children[1].textContent, 'Hold P to talk');
 
   fireDocument('keydown', { code: 'KeyP', target: documentStub.body, repeat: false });
   await tick();
@@ -189,7 +190,7 @@ test('microphone permission failures report a safe actionable reason without raw
   const status = elements.find((element) => element.id === 'boson-ptt-status')?.textContent ?? '';
   assert.match(status, /Microphone permission was denied/);
   assert.doesNotMatch(status, /secret-bearing|Denied by user/);
-  const button = elements.find((element) => element.textContent === 'Hold to talk');
+  const button = elements.find((element) => element.textContent === 'Hold P to talk');
   assert.equal(button?.attributes.get('aria-pressed'), 'false', 'failed permission startup restores idle control state');
 });
 
@@ -221,7 +222,7 @@ test('rejected local begin stops the mic, clears pressed state and allows a retr
   await tick();
   assert.equal(stopCalls, 1);
   assert.equal(button.attributes.get('aria-pressed'), 'false');
-  assert.equal(button.textContent, 'Hold to talk');
+  assert.equal(button.textContent, 'Hold P to talk');
   assert.equal(clearTimeoutCalls, 1);
   assert.match(elements.find((element) => element.id === 'boson-ptt-status')?.textContent ?? '', /Boson voice is not configured/);
 
@@ -243,7 +244,7 @@ test('held PTT release before permission resolves stops the late microphone stre
   const { elements } = await setupBrowser(() => new Promise((resolve) => { allowMic = resolve; }), fetcher);
   const module = await import('./viewer-ptt.js?permission-test');
   await tick();
-  const button = elements.find((element) => element.textContent === 'Hold to talk');
+  const button = elements.find((element) => element.textContent === 'Hold P to talk');
   assert.ok(button);
   button.fire('pointerdown');
   button.fire('pointerup');
@@ -317,7 +318,7 @@ test('PTT sends audio only during hold and requests a text-only tool-free respon
   Object.defineProperty(globalThis, 'WebSocket', { configurable: true, value: FakeWebSocket });
   const module = await import('./viewer-ptt.js?text-only-test');
   await tick();
-  const button = elements.find((element) => element.textContent === 'Hold to talk');
+  const button = elements.find((element) => element.textContent === 'Hold P to talk');
   assert.ok(button);
   button.fire('pointerdown');
   await tick();

@@ -49,6 +49,7 @@
     .enable-audio:hover { background: #344542; }
     .enable-audio:focus-visible, button:focus-visible { outline: 3px solid #087f75; outline-offset: 3px; }
     .audio-enable-note { display: inline-block; margin-left: 9px; color: var(--muted); font-size: 12px; vertical-align: middle; }
+    #run-controls[hidden] { display: none; }
     #ptt-slot, #audio-slot { margin-top: 14px; }
     #ptt-slot #boson-ptt { position: static !important; z-index: auto !important; width: 100% !important; padding: 12px 0 0 !important; border: 0 !important; border-top: 1px dashed var(--line) !important; border-radius: 0 !important; color: var(--ink) !important; background: transparent !important; font: inherit !important; }
     #ptt-slot #boson-ptt strong { display: none !important; }
@@ -60,7 +61,6 @@
     #audio-slot #boson-audio strong { display: none !important; }
     #audio-slot #boson-audio p { margin: 0 0 7px !important; font: 14px/1.4 Georgia, serif !important; }
     #audio-slot #boson-audio button { min-height: 30px; margin: 0 5px 0 0 !important; padding: 5px 9px !important; border: 1px solid var(--line) !important; border-radius: 3px !important; color: var(--ink) !important; background: transparent !important; font: 600 11px/1 var(--mono) !important; }
-    #audio-slot #boson-pause, #audio-slot #boson-stop { display: none; }
     #boson-audio-status { display: block; min-height: 20px; margin-top: 8px; color: var(--muted); font: 11px/1.45 var(--mono); }
     .signal-list { position: relative; display: grid; gap: 0; margin-top: 11px; }
     .signal-list::before { position: absolute; top: 15px; bottom: 18px; left: 7px; width: 1px; background: var(--line); content: ""; }
@@ -73,6 +73,15 @@
     .usage { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 13px 20px; margin-top: 5px; padding-top: 15px; border-top: 1px solid var(--line); }
     .usage-item strong { display: block; margin-top: 5px; font: 600 15px/1.3 var(--mono); }
     .usage-foot { margin: 11px 0 0; color: var(--muted); font: 11px/1.5 var(--mono); }
+    .outcome { margin-top: 10px; padding: 18px 18px 16px; border-left: 3px solid var(--line); background: rgba(255,255,255,.45); }
+    .outcome h2 { margin: 5px 0 9px; font: 500 25px/1.12 Georgia, serif; }
+    .outcome p { margin: 6px 0 0; color: var(--muted); font-size: 13px; line-height: 1.5; }
+    .outcome[data-state="good"] { border-color: var(--good); }
+    .outcome[data-state="warn"] { border-color: var(--warn); }
+    .outcome-note { font: 11px/1.5 var(--mono) !important; }
+    .diagnostics { margin-top: 22px; border-top: 1px solid var(--line); padding-top: 12px; }
+    .diagnostics summary { width: fit-content; color: var(--muted); font: 700 10px/1.4 var(--mono); letter-spacing: .07em; text-transform: uppercase; cursor: pointer; }
+    .diagnostics summary:focus-visible { outline: 3px solid #087f75; outline-offset: 3px; }
     .foot { display: flex; justify-content: space-between; gap: 16px; margin-top: 12px; color: var(--muted); font: 10px/1.4 var(--mono); text-transform: uppercase; letter-spacing: .05em; }
     .error { color: var(--signal-dark) !important; }
     .success { color: var(--good) !important; }
@@ -110,43 +119,54 @@
         </div>
         <p class="public-note"><strong>Known fact</strong><span>The garden is growing well today.</span></p>
         <blockquote class="reply-line">“Hello. The garden is growing well today. Thanks for stopping by.”</blockquote>
-        <ol class="instructions">
-          <li>Enable reply audio once, then hold P or hold the talk button.</li>
-          <li>Speak briefly and release to send the turn.</li>
-          <li>Check the signal states for Realtime input, response, and TTS playback.</li>
-        </ol>
-        <button id="enable-audio" class="enable-audio" type="button">Enable reply audio</button>
-        <span id="audio-enable-note" class="audio-enable-note">Needed for browser playback.</span>
-        <div id="audio-slot" aria-label="Reply audio controls"></div>
-        <div id="ptt-slot" aria-label="Push-to-talk control"></div>
+        <p class="instructions">Enable audio once, then hold P or the talk button. Release when you’re done speaking.</p>
+        <div id="run-controls" hidden>
+          <button id="enable-audio" class="enable-audio" type="button">Enable audio</button>
+          <span id="audio-enable-note" class="audio-enable-note" role="status" aria-live="polite">One tap enables reply playback.</span>
+          <div id="ptt-slot" aria-label="Push-to-talk control"></div>
+        </div>
       </section>
 
-      <section class="right-rail" aria-labelledby="signal-title">
-        <p id="signal-title" class="eyebrow">Live signal · payloads hidden</p>
-        <div class="signal-list">
-          <div class="signal-row"><span class="signal-dot" id="dot-connection" aria-hidden="true"></span><span class="signal-name">Realtime</span><span class="signal-value" id="realtime-state" role="status" aria-live="polite">Not started</span></div>
-          <div class="signal-row"><span class="signal-dot" id="dot-mic" aria-hidden="true"></span><span class="signal-name">Microphone</span><span class="signal-value" id="mic-state" role="status" aria-live="polite">Released · permission not requested</span></div>
-          <div class="signal-row"><span class="signal-dot" id="dot-input" aria-hidden="true"></span><span class="signal-name">Input to provider</span><span class="signal-value" id="input-state">No audio sent</span></div>
-          <div class="signal-row"><span class="signal-dot" id="dot-response" aria-hidden="true"></span><span class="signal-name">Response</span><span class="signal-value" id="response-state">Waiting for a held turn</span></div>
-          <div class="signal-row"><span class="signal-dot" id="dot-selection" aria-hidden="true"></span><span class="signal-name">Authored line</span><span class="signal-value" id="selection-state">Waiting for turn completion</span></div>
-          <div class="signal-row"><span class="signal-dot" id="dot-tts" aria-hidden="true"></span><span class="signal-name">TTS playback</span><span class="signal-value" id="tts-state">Waiting for authored reply</span></div>
+      <section class="right-rail" aria-labelledby="outcome-title">
+        <p class="eyebrow">Isolated voice test</p>
+        <div id="outcome-summary" class="outcome" data-state="">
+          <h2 id="outcome-title" role="status" aria-live="polite">Checking the isolated test…</h2>
+          <p id="outcome-message">Waiting for the local test status.</p>
+          <p id="outcome-playback"></p>
+          <p id="outcome-note" class="outcome-note"></p>
         </div>
-        <div class="usage" aria-label="Bounded test usage">
-          <div class="usage-item"><span class="micro-label">Realtime turns</span><strong id="turn-usage">0 / 1</strong></div>
-          <div class="usage-item"><span class="micro-label">Hold limit</span><strong>30 seconds</strong></div>
-          <div class="usage-item"><span class="micro-label">TTS requests</span><strong id="tts-usage">0 / 1</strong></div>
-          <div class="usage-item"><span class="micro-label">TTS text cap</span><strong>120 characters</strong></div>
-        </div>
-        <p id="usage-foot" class="usage-foot">Realtime monetary usage is not reported here. TTS estimate uses the adapter’s configured per-character rate; provider billing may differ.</p>
-        <p id="harness-error" class="usage-foot error" role="status" aria-live="polite"></p>
+        <details id="diagnostics" class="diagnostics">
+          <summary>Technical diagnostics</summary>
+          <div id="audio-slot" aria-label="Reply audio controls"></div>
+          <div class="signal-list" aria-label="Live provider signals">
+            <div class="signal-row"><span class="signal-dot" id="dot-connection" aria-hidden="true"></span><span class="signal-name">Realtime</span><span class="signal-value" id="realtime-state" role="status" aria-live="polite">Not started</span></div>
+            <div class="signal-row"><span class="signal-dot" id="dot-mic" aria-hidden="true"></span><span class="signal-name">Microphone</span><span class="signal-value" id="mic-state" role="status" aria-live="polite">Released · permission not requested</span></div>
+            <div class="signal-row"><span class="signal-dot" id="dot-input" aria-hidden="true"></span><span class="signal-name">Input to provider</span><span class="signal-value" id="input-state">No audio sent</span></div>
+            <div class="signal-row"><span class="signal-dot" id="dot-response" aria-hidden="true"></span><span class="signal-name">Response</span><span class="signal-value" id="response-state">Waiting for a held turn</span></div>
+            <div class="signal-row"><span class="signal-dot" id="dot-selection" aria-hidden="true"></span><span class="signal-name">Authored line</span><span class="signal-value" id="selection-state">Waiting for turn completion</span></div>
+            <div class="signal-row"><span class="signal-dot" id="dot-tts" aria-hidden="true"></span><span class="signal-name">TTS playback</span><span class="signal-value" id="tts-state">Waiting for authored reply</span></div>
+          </div>
+          <div class="usage" aria-label="Bounded test usage">
+            <div class="usage-item"><span class="micro-label">Realtime turns</span><strong id="turn-usage">0 / 1</strong></div>
+            <div class="usage-item"><span class="micro-label">Hold limit</span><strong>30 seconds</strong></div>
+            <div class="usage-item"><span class="micro-label">TTS requests</span><strong id="tts-usage">0 / 1</strong></div>
+            <div class="usage-item"><span class="micro-label">TTS text cap</span><strong>120 characters</strong></div>
+          </div>
+          <p id="usage-foot" class="usage-foot">Realtime monetary usage is not reported here. TTS estimate uses the adapter’s configured per-character rate; provider billing may differ.</p>
+          <p id="harness-error" class="usage-foot error" role="status" aria-live="polite"></p>
+        </details>
       </section>
     </div>
     <footer class="foot"><span>No world state · one speaker · one turn</span><span>Hold P or the button · mic opens only while held</span></footer>
   </main>
 
-  <script nonce="__CSP_NONCE__">
+  <script type="module" nonce="__CSP_NONCE__">
+    import { deriveAudioBenchOutcome } from '/ptt-audio-test-view.js';
+
     (() => {
       const NativeWebSocket = window.WebSocket;
+      const runControls = document.getElementById('run-controls');
+      const outcomeSummary = document.getElementById('outcome-summary');
       const styleNonce = document.querySelector('script[nonce]')?.nonce;
       const createElement = Document.prototype.createElement;
       Document.prototype.createElement = function (name, ...options) {
@@ -155,6 +175,9 @@
         return element;
       };
       const state = { socket: 'not started', inputChunks: 0, inputCommitSent: false, inputCommitted: false, response: 'waiting', error: false };
+      let audioEnableRequested = false;
+      let audioEnablePending = false;
+      let audioEnabled = false;
       let heldSince = 0;
       let holdTimer = null;
       const text = (id, value, stateName) => {
@@ -202,6 +225,52 @@
           text('tts-state', playback, '');
         }
       };
+      const renderOutcome = (snapshot) => {
+        const outcome = deriveAudioBenchOutcome(snapshot);
+        const ptt = document.querySelector('#boson-ptt button');
+        const isHeld = ptt?.getAttribute('aria-pressed') === 'true';
+        runControls.hidden = outcome.kind !== 'ready' && !(outcome.kind === 'pending' && isHeld);
+        outcomeSummary.dataset.state = outcome.kind === 'complete'
+          ? outcome.message.includes('without selecting') ? 'warn' : 'good'
+          : '';
+        text('outcome-title', outcome.title);
+        text('outcome-message', outcome.message);
+        text('outcome-playback', outcome.playback);
+        text('outcome-note', outcome.note);
+        if (outcome.kind === 'pending' && isHeld) {
+          text('outcome-message', 'This held turn is in progress. Release P or the talk button to finish.');
+        }
+        text('turn-usage', `${snapshot.usage.realtimeTurns} / ${snapshot.limits.realtimeTurns}`);
+        text('tts-usage', `${snapshot.usage.tts.requests} / ${snapshot.limits.ttsRequests}`);
+        const cost = Number(snapshot.usage.tts.estimatedUsd);
+        document.getElementById('usage-foot').textContent = `Realtime billed usage is unknown. TTS estimate so far: $${Number.isFinite(cost) ? cost.toFixed(6) : 'unknown'}; provider billing is not reported here.`;
+      };
+      const syncAudioEnableFeedback = () => {
+        const status = document.querySelector('#boson-audio-status')?.textContent?.trim() ?? '';
+        const button = document.getElementById('enable-audio');
+        const note = document.getElementById('audio-enable-note');
+        if (status.startsWith('Spatial audio enabled')) {
+          audioEnabled = true;
+          audioEnablePending = false;
+          note.textContent = 'Reply audio is enabled.';
+        } else if (status.startsWith('Degraded · Web Audio unavailable')) {
+          audioEnabled = true;
+          audioEnablePending = false;
+          note.textContent = 'Browser fallback is ready; spatial audio is unavailable.';
+        } else if (status.startsWith('Boson Higgs TTS')) {
+          audioEnabled = true;
+          audioEnablePending = false;
+          note.textContent = 'Reply audio is enabled; provider TTS returned audio.';
+        } else if (status.startsWith('Degraded · browser SpeechSynthesis')) {
+          audioEnabled = true;
+          audioEnablePending = false;
+          note.textContent = 'Reply audio is enabled; this reply is using browser speech.';
+        } else if (audioEnableRequested && status.startsWith('Dialogue stream disconnected')) {
+          audioEnablePending = false;
+          note.textContent = 'Reply audio could not connect. Technical details are below.';
+        }
+        button.disabled = audioEnabled || audioEnablePending;
+      };
       const observeType = (type, inbound = false, errorCode = '') => {
         if (!type) return;
         if (type === 'session.update') state.socket = 'connecting';
@@ -245,7 +314,7 @@
         if (!pressed) heldSince = 0;
         render();
       };
-      const handleMutation = () => { refreshMic(); };
+      const handleMutation = () => { refreshMic(); syncAudioEnableFeedback(); };
       window.addEventListener('pointerdown', (event) => {
         if (event.target?.closest?.('#boson-ptt button')) {
           if (!heldSince) heldSince = Date.now();
@@ -257,8 +326,7 @@
       const statusTimer = window.setInterval(() => { refreshMic(); void refreshUsage(); }, 750);
       window.addEventListener('ptt-harness-usage', (event) => {
         const usage = event.detail;
-        text('turn-usage', `${usage.usage.realtimeTurns} / ${usage.limits.realtimeTurns}`);
-        text('tts-usage', `${usage.usage.tts.requests} / ${usage.limits.ttsRequests}`);
+        renderOutcome(usage);
         if (usage.usage.lastTurn) {
           const turn = usage.usage.lastTurn;
           const stateText = turn.status === 'authored_response_selected'
@@ -266,8 +334,6 @@
             : `Authored fallback · ${turn.lineId}`;
           text('selection-state', stateText, turn.status === 'authored_response_selected' ? 'good' : 'warn');
         }
-        const cost = Number(usage.usage.tts.estimatedUsd).toFixed(6);
-        document.getElementById('usage-foot').textContent = `Realtime billed usage is unknown. TTS estimate so far: $${cost}; provider billing is not reported here.`;
         render();
       });
       window.addEventListener('ptt-audio-render', render);
@@ -279,11 +345,25 @@
           window.dispatchEvent(new CustomEvent('ptt-harness-usage', { detail: usage }));
         } catch {
           text('harness-error', 'Local usage status is unavailable.', 'warn');
+          runControls.hidden = true;
+          outcomeSummary.dataset.state = 'warn';
+          text('outcome-title', 'Test status unavailable');
+          text('outcome-message', 'The one-turn allowance could not be checked, so test controls stay hidden.');
+          text('outcome-playback', 'Reconnect to the local lab to see its current result.');
+          text('outcome-note', 'No provider attempt was made from this status check.');
         }
       }
       document.getElementById('enable-audio').addEventListener('click', () => {
-        document.querySelector('#boson-enable')?.click();
-        document.getElementById('audio-enable-note').textContent = 'Reply audio enabled for this tab.';
+        const enableButton = document.querySelector('#boson-enable');
+        if (!enableButton) {
+          document.getElementById('audio-enable-note').textContent = 'Reply audio controls are still loading. Try again in a moment.';
+          return;
+        }
+        audioEnableRequested = true;
+        audioEnablePending = true;
+        document.getElementById('audio-enable-note').textContent = 'Enabling reply audio…';
+        document.getElementById('enable-audio').disabled = true;
+        enableButton.click();
       });
       window.addEventListener('load', () => {
         const pttPanel = document.querySelector('#boson-ptt');
@@ -293,6 +373,7 @@
         const observer = new MutationObserver(handleMutation);
         for (const node of [pttPanel, audioPanel].filter(Boolean)) observer.observe(node, { childList: true, subtree: true, characterData: true, attributes: true });
         document.getElementById('dot-connection').dataset.state = '';
+        syncAudioEnableFeedback();
         render();
         void refreshUsage();
       }, { once: true });
