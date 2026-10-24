@@ -1,3 +1,4 @@
+import { createHash } from 'node:crypto';
 import { distance3D, RESIDENT_HEARING_RADIUS, type Position3D } from './village-encounters.ts';
 
 const MAX_TRANSCRIPT_BYTES = 1_000;
@@ -81,7 +82,7 @@ export function projectCompletedResidentSpeech(input: {
 
   return {
     type: 'resident.speech.perceived',
-    eventId: responseKey,
+    eventId: `resident-speech:${createHash('sha256').update(responseKey).digest('base64url').slice(0, 32)}`,
     speakerId: session.speakerId,
     responseId: session.responseId,
     text: playbackReport.transcript,

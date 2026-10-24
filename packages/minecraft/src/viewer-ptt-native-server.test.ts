@@ -5,7 +5,7 @@ import { mkdtemp, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import test from 'node:test';
-import { createPttServer, isNativeBeginRequest } from './viewer-ptt-server.ts';
+import { createPttServer, isNativeBeginRequest, isNativePlayerSpeechPayload } from './viewer-ptt-server.ts';
 import { buildNativeResidentInstructions, equalLoafResidentFact } from './native-resident-context.ts';
 
 const baseResident = {
@@ -39,6 +39,14 @@ test('native begin validates known resident sessions and prompts with attributed
   assert.doesNotMatch(prompt, /Speak naturally and briefly/);
   assert.doesNotMatch(prompt, /Do not invent policies/);
   assert.doesNotMatch(prompt, /lineId/);
+});
+
+test('player input final accepts only a bounded provider item and server-bound turn fields', () => {
+  const payload = { turnId: 'turn_12345678', residentSessionId: 'resident_session', itemId: 'item_input_1', transcript: 'Please water the seedlings.' };
+  assert.equal(isNativePlayerSpeechPayload(payload), true);
+  assert.equal(isNativePlayerSpeechPayload({ ...payload, speakerId: 'pip' }), false);
+  assert.equal(isNativePlayerSpeechPayload({ ...payload, position: { x: 0, y: 64, z: 0 } }), false);
+  assert.equal(isNativePlayerSpeechPayload({ ...payload, transcript: 'x'.repeat(1_001) }), false);
 });
 
 test('Equal Loaf native facts stay asymmetric across Thomas, James, and Anna', () => {
@@ -90,10 +98,12 @@ test('native voice turns bind resident sessions, issue credentials once, and for
         return;
       }
       const phase = command.type === 'ptt.session.bind' ? 'session'
-        : command.type === 'ptt.speech.start' || command.type === 'ptt.speech.finish' ? 'speech' : 'native';
+        : command.type === 'ptt.speech.start' || command.type === 'ptt.speech.finish' ? 'speech'
+          : command.type === 'ptt.player.speech.finish' ? 'player.speech' : 'native';
       const status = command.type === 'ptt.session.bind' ? 'bound'
         : command.type === 'ptt.speech.start' ? 'started'
-          : command.type === 'ptt.speech.finish' ? 'finished' : 'ended';
+          : command.type === 'ptt.player.speech.finish' ? 'queued'
+            : command.type === 'ptt.speech.finish' ? 'finished' : 'ended';
       socket.end(`${JSON.stringify({ version: 1, type: `ptt.${phase}.ack`, turnId: command.turnId, status })}\n`);
     });
   });
@@ -139,6 +149,21 @@ test('native voice turns bind resident sessions, issue credentials once, and for
       turnId: first.turnId, residentSessionId: first.residentSessionId,
     });
     assert.equal(duplicateCredentials.status, 409);
+
+    const playerSpeech = await post('/boson-ptt/player-speech/finish', {
+      turnId: first.turnId, residentSessionId: first.residentSessionId, itemId: 'input_item_1',
+      transcript: 'Please water the seedlings.',
+    });
+    assert.equal(playerSpeech.status, 200);
+    assert.deepEqual(commands.filter(({ type }) => type === 'ptt.player.speech.finish').map(({ turnId, residentSessionId, itemId, transcript }) =>
+      ({ turnId, residentSessionId, itemId, transcript })), [{
+      turnId: first.turnId, residentSessionId: first.residentSessionId, itemId: 'input_item_1', transcript: 'Please water the seedlings.',
+    }]);
+    const forgedPlayerSpeech = await post('/boson-ptt/player-speech/finish', {
+      turnId: first.turnId, residentSessionId: first.residentSessionId, itemId: 'input_item_2',
+      transcript: 'Come closer.', speakerId: 'pip',
+    });
+    assert.equal(forgedPlayerSpeech.status, 400);
 
     const start = await post('/boson-ptt/speech/start', {
       turnId: first.turnId, residentSessionId: first.residentSessionId, responseId: 'resp_1', itemId: 'item_1',

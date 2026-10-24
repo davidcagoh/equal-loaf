@@ -79,6 +79,14 @@ test('native speech IPC binds opaque response IDs to a resident session and reje
   }), false);
 });
 
+test('final player speech IPC is turn/session/item bound and rejects client speaker or position claims', () => {
+  const common = { version: 1, turnId: 'turn-player-123', residentSessionId: 'resident-session-123', itemId: 'item_player_1', at: Date.now() };
+  assert.equal(isVillagePttCommand({ ...common, type: 'ptt.player.speech.finish', transcript: 'The gardens need water.' }), true);
+  assert.equal(isVillagePttCommand({ ...common, type: 'ptt.player.speech.finish', transcript: 'x'.repeat(1_001) }), false);
+  assert.equal(isVillagePttCommand({ ...common, type: 'ptt.player.speech.finish', transcript: 'The gardens need water.', speakerId: 'pip' }), false);
+  assert.equal(isVillagePttCommand({ ...common, type: 'ptt.player.speech.finish', transcript: 'The gardens need water.', position: { x: 0, y: 0, z: 0 } }), false);
+});
+
 test('resident position snapshots accept only bounded, authoritative-shaped coordinates', () => {
   const event = {
     type: 'village.residents', timestamp: Date.now(),

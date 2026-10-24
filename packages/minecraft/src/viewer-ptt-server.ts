@@ -76,6 +76,13 @@ interface NativeSpeechPayload {
   transcript?: string;
 }
 
+export interface NativePlayerSpeechPayload {
+  turnId: string;
+  residentSessionId: string;
+  itemId: string;
+  transcript: string;
+}
+
 interface PttServer {
   handleRequest(request: IncomingMessage, response: ServerResponse): boolean;
   close(): void;
@@ -180,6 +187,17 @@ export function isNativeBeginRequest(value: unknown): value is NativeBeginReques
   return Array.isArray(ids) && ids.length <= MAX_NATIVE_SESSION_IDS
     && ids.every((id) => safeString(id, 64) && /^[A-Za-z0-9_-]+$/.test(id))
     && new Set(ids).size === ids.length;
+}
+
+export function isNativePlayerSpeechPayload(value: unknown): value is NativePlayerSpeechPayload {
+  if (!value || typeof value !== 'object' || Array.isArray(value)
+    || !objectHasExactKeys(value as Record<string, unknown>, ['turnId', 'residentSessionId', 'itemId', 'transcript'])) return false;
+  const payload = value as Record<string, unknown>;
+  return safeString(payload.turnId, 128) && /^[A-Za-z0-9_-]+$/.test(payload.turnId)
+    && safeString(payload.residentSessionId, 64) && /^[A-Za-z0-9_-]+$/.test(payload.residentSessionId)
+    && safeString(payload.itemId, 160) && /^[A-Za-z0-9_.:-]+$/.test(payload.itemId)
+    && safeString(payload.transcript, MAX_NATIVE_TRANSCRIPT_BYTES)
+    && Buffer.byteLength(payload.transcript, 'utf8') <= MAX_NATIVE_TRANSCRIPT_BYTES;
 }
 
 function requestVillageIpc(event: Record<string, unknown>): Promise<Record<string, unknown>> {
@@ -580,6 +598,30 @@ export function createPttServer(port: number): PttServer {
     }
   };
 
+  const nativePlayerSpeechFinish = async (request: IncomingMessage, response: ServerResponse): Promise<void> => {
+    let body: unknown;
+    try { body = await readSmallJson(request, 2_048); } catch {
+      respond(response, 400, { accepted: false, error: 'Invalid player speech transcript.' });
+      return;
+    }
+    if (!isNativePlayerSpeechPayload(body)) {
+      respond(response, 400, { accepted: false, error: 'Invalid player speech transcript.' });
+      return;
+    }
+    const turn = matchesNativeTurn(body.turnId, body.residentSessionId);
+    if (!turn) {
+      respond(response, 410, { accepted: false, error: 'Resident voice turn expired.' });
+      return;
+    }
+    try {
+      const ack = await requestVillageIpc({ version: 1, type: 'ptt.player.speech.finish', ...body, at: Date.now() });
+      const accepted = ack.type === 'ptt.player.speech.ack' && ack.turnId === body.turnId && ack.status === 'queued';
+      respond(response, accepted ? 200 : 409, { accepted, status: ack.status });
+    } catch {
+      respond(response, 503, { accepted: false, error: 'Village speech tracking is unavailable.' });
+    }
+  };
+
   const nativeEnd = async (request: IncomingMessage, response: ServerResponse): Promise<void> => {
     let body: unknown;
     try { body = await readSmallJson(request, 512); } catch {
@@ -724,6 +766,10 @@ export function createPttServer(port: number): PttServer {
       }
       if (pathname === '/boson-ptt/speech/finish') {
         void nativeSpeechFinish(request, response);
+        return true;
+      }
+      if (pathname === '/boson-ptt/player-speech/finish') {
+        void nativePlayerSpeechFinish(request, response);
         return true;
       }
       if (pathname === '/boson-ptt/native/end') {

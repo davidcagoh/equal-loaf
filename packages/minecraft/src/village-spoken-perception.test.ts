@@ -27,6 +27,7 @@ test('projects completed speech only to non-speakers who stayed inside engine he
   assert.deepEqual(event?.recipientIds, ['mira']);
   assert.equal(event?.speakerId, 'pip');
   assert.equal(event?.text, 'The west path is flooded.');
+  assert.ok((event?.eventId.length ?? 0) <= 64);
   assert.equal(event?.startedAtTick, 10);
   assert.equal(event?.completedAtTick, 20);
   assert.deepEqual([...consumedResponseIds], ['session-a:turn-1:response-1:item-1']);

@@ -1,4 +1,10 @@
-import type { TransientResidentSpeechPerception } from './village-spoken-perception.ts';
+interface AttributedSpeechPerception {
+  eventId: string;
+  speakerId: string;
+  text: string;
+  recipientIds: readonly string[];
+  completedAtTick: number;
+}
 
 export interface HeardSpeechContext {
   eventId: string;
@@ -23,7 +29,7 @@ export class VillageHeardSpeechMemory {
     this.#ttlMs = ttlMs;
   }
 
-  remember(event: TransientResidentSpeechPerception, speakerName: string): number {
+  remember(event: AttributedSpeechPerception, speakerName: string): number {
     let delivered = 0;
     for (const residentId of event.recipientIds) {
       if (residentId === event.speakerId) continue;

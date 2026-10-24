@@ -63,6 +63,16 @@ export interface VillageResidentSpeechFinishCommand {
   at: number;
 }
 
+export interface VillagePlayerSpeechFinishCommand {
+  version: 1;
+  type: 'ptt.player.speech.finish';
+  turnId: string;
+  residentSessionId: string;
+  itemId: string;
+  transcript: string;
+  at: number;
+}
+
 export interface VillageNativePttEndCommand {
   version: 1;
   type: 'ptt.native.end';
@@ -73,7 +83,7 @@ export interface VillageNativePttEndCommand {
 
 export type VillagePttCommand = VillagePttBeginCommand | VillageNativePttBeginCommand | VillagePttCompleteCommand | VillagePttCancelCommand
   | VillagePttBindResidentSessionCommand | VillageResidentSpeechStartCommand
-  | VillageResidentSpeechFinishCommand | VillageNativePttEndCommand;
+  | VillageResidentSpeechFinishCommand | VillagePlayerSpeechFinishCommand | VillageNativePttEndCommand;
 
 export interface VillagePttBeginContext {
   id: string;
@@ -146,6 +156,14 @@ export function isVillagePttCommand(value: unknown): value is VillagePttCommand 
     if (!hasTranscript) return command.playback === 'interrupted';
     return command.playback === 'completed' && typeof command.transcript === 'string'
       && command.transcript.trim().length > 0
+      && Buffer.byteLength(command.transcript, 'utf8') <= MAX_NATIVE_TRANSCRIPT_BYTES
+      && !/[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f]/.test(command.transcript);
+  }
+  if (command.type === 'ptt.player.speech.finish') {
+    return Object.keys(command).sort().join(',') === 'at,itemId,residentSessionId,transcript,turnId,type,version'
+      && SESSION_ID_PATTERN.test(String(command.residentSessionId ?? ''))
+      && PROVIDER_ID_PATTERN.test(String(command.itemId ?? ''))
+      && typeof command.transcript === 'string' && command.transcript.trim().length > 0
       && Buffer.byteLength(command.transcript, 'utf8') <= MAX_NATIVE_TRANSCRIPT_BYTES
       && !/[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f]/.test(command.transcript);
   }
