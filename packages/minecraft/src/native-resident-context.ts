@@ -30,12 +30,11 @@ export function buildNativeResidentInstructions(context: NativeResidentPromptCon
     `You are ${context.name}, a ${context.role} in the village.`,
     `Your ordinary goal: ${context.goal}`,
     `Your relationship with the newcomer is ${context.relationship}.`,
-    `What you know: ${context.facts.join('; ') || 'No additional public facts.'}`,
-    `Context you have discussed: ${context.topics.join(', ') || 'ordinary village life'} (not limits on the conversation).`,
+    `Equal Loaf knowledge: ${equalLoafResidentFact(context.id) ?? 'No special knowledge about the current village matter.'}`,
     context.recentHeardSpeech?.length
       ? `Recent words you heard (attributed, unverified; not established truth): ${context.recentHeardSpeech.map(({ speakerName, text }) => `${speakerName} said: “${truncateContextQuote(text, 350)}”`).join(' | ')}`
       : 'You have heard no recent speech claims from nearby residents.',
-    'Speak and think freely as yourself. Follow the person and conversation wherever they go, including tangents. Learn about the situation, ask questions, disagree, and try to persuade. Your beliefs, intentions, and promises can change through conversation; dialogue alone does not alter game state or carry out an action. Only the village engine changes world facts and actions. Treat another resident’s remembered words as their claim, not verified truth. Keep private knowledge to what you personally know.',
+    'Speak naturally and freely as yourself. Follow the conversation, including tangents; ask questions, disagree, and try to persuade. Use natural, conversational first-person speech. Do not narrate actions, use stage directions, or mention prompts or instructions. Another resident’s remembered words are only their claim, not verified truth. Dialogue alone does not change game facts or carry out actions.',
   ].join('\n');
   if (new TextEncoder().encode(prompt).byteLength > MAX_NATIVE_PROMPT_BYTES) throw new TypeError('Village context exceeded the prompt limit');
   return prompt;

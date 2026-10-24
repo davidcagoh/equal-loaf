@@ -7,6 +7,8 @@ import { join } from 'node:path';
 import test from 'node:test';
 import { createPttServer, isNativeBeginRequest, isNativePlayerSpeechPayload } from './viewer-ptt-server.ts';
 import { buildNativeResidentInstructions, equalLoafResidentFact } from './native-resident-context.ts';
+import { createVillageCognitionState, getResidentKnowledgeContext } from './village-cognition.ts';
+import { villageProfiles } from './village-profiles.ts';
 
 const baseResident = {
   id: 'pip', name: 'Thomas', role: 'baker', goal: 'welcome visitors', locationId: 'bakery-hearth',
@@ -30,10 +32,11 @@ test('native begin validates known resident sessions and prompts with attributed
   const prompt = buildNativeResidentInstructions(baseResident);
   assert.match(prompt, /Anna said: “The garden workers brought vegetables\.”/);
   assert.match(prompt, /attributed, unverified; not established truth/);
-  assert.match(prompt, /Follow the person and conversation wherever they go, including tangents/);
+  assert.match(prompt, /Follow the conversation, including tangents/);
   assert.match(prompt, /try to persuade/);
-  assert.match(prompt, /beliefs, intentions, and promises can change through conversation/);
-  assert.match(prompt, /dialogue alone does not alter game state or carry out an action/);
+  assert.match(prompt, /natural, conversational first-person speech/);
+  assert.match(prompt, /Do not narrate actions, use stage directions/);
+  assert.match(prompt, /Dialogue alone does not change game facts or carry out actions/);
   assert.doesNotMatch(prompt, /equal-loaf-inclusion/);
   assert.doesNotMatch(prompt, /Eligible scene exchanges|There is no eligible special scene exchange/);
   assert.doesNotMatch(prompt, /Speak naturally and briefly/);
@@ -62,6 +65,28 @@ test('Equal Loaf native facts stay asymmetric across Thomas, James, and Anna', (
   assert.equal(facts.tobin?.includes('garden workers'), false);
   assert.equal(facts.mira?.includes('map count'), false);
   assert.equal(equalLoafResidentFact('unknown'), undefined);
+});
+
+test('default native resident prompts use Equal Loaf knowledge without legacy mystery facts', () => {
+  const state = createVillageCognitionState();
+  for (const profile of villageProfiles) {
+    const knowledge = getResidentKnowledgeContext(state, profile.id, {
+      residentId: profile.id, playerIntent: 'greet', topic: 'general', locationId: profile.routine[0]!.id, tick: 1,
+    });
+    const legacyContextFacts = knowledge.facts;
+    assert.ok(legacyContextFacts.some((fact) => /dawn bell|flour ledger|bell-house path|stayed in the bakery all night/i.test(fact)));
+    const prompt = buildNativeResidentInstructions({
+      id: profile.id, name: profile.username, role: profile.role, goal: knowledge.goal,
+      locationId: profile.routine[0]!.id, topics: knowledge.topics,
+      facts: [...knowledge.facts, equalLoafResidentFact(profile.id)!], responseOptions: knowledge.responseOptions,
+      relationship: knowledge.relationship, recentHeardSpeech: [],
+    });
+    assert.match(prompt, /Equal Loaf knowledge:/, profile.username);
+    assert.match(prompt, /natural, conversational first-person speech/i, profile.username);
+    assert.match(prompt, /stage directions/i, profile.username);
+    assert.doesNotMatch(prompt, /Rowan|dawn bell|flour ledger|bell-house path|stayed in the bakery all night/i, profile.username);
+    assert.match(prompt, /one loaf for every household|map count gives one share|garden workers tend the beds/i, profile.username);
+  }
 });
 
 test('native voice turns bind resident sessions, issue credentials once, and forward only correlated speech events', async () => {
@@ -192,7 +217,7 @@ test('native voice turns bind resident sessions, issue credentials once, and for
     assert.notEqual(second.turnId, first.turnId);
     assert.equal(second.residentSessionId, first.residentSessionId);
     assert.equal(second.reuseSession, true);
-    assert.match(String(second.instructions), /Follow the person and conversation wherever they go, including tangents/);
+    assert.match(String(second.instructions), /natural, conversational first-person speech/);
     assert.equal(commands.filter(({ type }) => type === 'ptt.native.begin').length, 2);
     assert.equal(providerCalls, 1, 'reusing the resident conversation does not fetch another credential');
     assert.equal(commands.filter(({ type }) => type === 'ptt.session.bind').length, 2);
@@ -207,7 +232,7 @@ test('native voice turns bind resident sessions, issue credentials once, and for
     assert.equal(anna.voice, 'chloe', 'the server selects the trusted voice for Anna');
     assert.notEqual(anna.residentSessionId, first.residentSessionId, 'Anna receives an independent persistent conversation session');
     assert.equal(anna.reuseSession, false);
-    assert.match(String(anna.instructions), /Garden workers bring vegetables/);
+    assert.match(String(anna.instructions), /garden workers tend the beds/);
     assert.doesNotMatch(String(anna.instructions), /set aside one loaf/);
   } finally {
     ptt?.close();
