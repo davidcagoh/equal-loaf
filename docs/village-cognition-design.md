@@ -28,7 +28,7 @@ Player speech is an observed event after the explicit talk control and transcrip
 
 ## Authored versus generative responsibility
 
-Authored data owns mystery truth, who knows each clue, disclosure thresholds, beat order constraints, speaker/listener, social-intent allowlists, line intent, and actor-action allowlists. Deterministic rules own sensing, memory updates, eligibility, cooldowns, and action validation. The first slice can choose a small authored response intent deterministically. Later, an optional model may suggest one bounded social intent (such as acknowledge, deflect, ask, or disclose an already-known permitted fact) grounded in the selected resident's current facts and relationship; local validation checks knowledge, scene eligibility, and allowed intent before accepting it. It may phrase only the validated intent, return silence, or fall back to authored text. It cannot grant knowledge, rewrite beliefs, identify the culprit, accuse the player, or issue a Minecraft command. That keeps story correctness inspectable while leaving room for social response and wording flexibility.
+Authored data owns mystery truth, who knows each clue, disclosure thresholds, beat order constraints, speaker/listener, response options, and actor-action allowlists. Deterministic rules own sensing, memory updates, eligibility, cooldowns, action validation, and speech rendering. A scoped model may classify the transient PTT transcript into a bounded player intent/topic and choose a response ID from the selected resident's disclosure-safe `responseOptions`. The local selector maps that ID to an eligible authored beat and derives the action; the simulator renders the authored line text. Unknown IDs, hidden clue IDs, and any model-supplied prose are rejected in favor of the deterministic authored response. The model cannot grant knowledge, rewrite beliefs, identify the culprit, accuse the player, or issue a Minecraft command.
 
 ## First playable scenario: Quiet Bell, one short scene
 
@@ -55,7 +55,7 @@ For component acceptance, the core reducer can be exercised with synthetic typed
 - A typed observed event can make one authored beat eligible; before/after state yields different resident behavior.
 - A selected beat determines both an allowlisted action and a bounded utterance intent; validation/failure falls back to the routine and authored line.
 - Identical initial state, event sequence, and seed produce the same beat/action/line intent.
-- No model receives hidden solution facts or controls world truth/actions. A model-suggested social intent and text, if enabled, are validated against the selected resident's known facts and allowed intents, or replaced by authored fallback/silence.
+- No model receives hidden solution facts or controls world truth/actions. A model may return only a bounded player intent, topic, and response ID from the selected resident's safe option list; all spoken text is rendered from local authored content.
 - Component tests can inject synthetic typed events. The live Quiet Bell slice separately supports PTT, overhearing, independent reactions from in-earshot residents, a nearest-resident guarded Mira response, and later clue disclosure only when its conditions are met.
 
 ## Research and adaptation notes

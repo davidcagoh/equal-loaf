@@ -8,6 +8,8 @@ export interface VillagerProfile {
   id: string;
   username: string;
   role: string;
+  goal: string;
+  knownFactIds: readonly string[];
   routine: readonly RoutineStop[];
   pauseMs: number;
 }
@@ -26,6 +28,8 @@ export const villageProfiles: readonly VillagerProfile[] = [
     id: 'mira',
     username: 'MiraGardener',
     role: 'gardener',
+    goal: 'protect the seedlings and keep the village fed',
+    knownFactIds: ['silent-bell', 'mira-sighting', 'seedlings-safe'],
     routine: [
       { id: 'west-garden', place: 'west garden', offset: [5, 2] },
       { id: 'market-well', place: 'market well', offset: [2, -1] },
@@ -37,6 +41,8 @@ export const villageProfiles: readonly VillagerProfile[] = [
     id: 'tobin',
     username: 'TobinCart',
     role: 'cartographer',
+    goal: 'keep route records reliable and prevent panic',
+    knownFactIds: ['silent-bell', 'flour-ledger', 'route-mark'],
     routine: [
       { id: 'map-board', place: 'map board', offset: [-5, 2] },
       { id: 'river-gate', place: 'river gate', offset: [-8, 0] },
@@ -48,6 +54,8 @@ export const villageProfiles: readonly VillagerProfile[] = [
     id: 'pip',
     username: 'PipBaker',
     role: 'baker',
+    goal: 'keep the bakery running and protect its reputation',
+    knownFactIds: ['silent-bell', 'flour-ledger', 'pip-denial', 'pip-contradiction'],
     routine: [
       { id: 'bakery-hearth', place: 'bakery hearth', offset: [0, -6] },
       { id: 'market-well', place: 'market well', offset: [2, -1] },

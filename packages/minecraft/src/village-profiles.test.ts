@@ -9,6 +9,8 @@ test('village residents have distinct identities and multi-stop role routines', 
   assert.equal(new Set(villageProfiles.map(({ role }) => role)).size, 3);
   for (const profile of villageProfiles) {
     assert.match(profile.username, /^[A-Za-z0-9_]{3,16}$/);
+    assert.ok(profile.goal.length > 0);
+    assert.ok(profile.knownFactIds.length > 0);
     assert.ok(profile.routine.length >= 3);
     assert.equal(new Set(profile.routine.map(({ id }) => id)).size, profile.routine.length);
     assert.ok(profile.pauseMs >= 10_000);
