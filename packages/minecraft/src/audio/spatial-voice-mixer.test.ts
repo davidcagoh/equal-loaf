@@ -20,7 +20,7 @@ test('attenuation and stereo pan respond to distance and listener yaw', () => {
   assert.equal(attenuationForDistance(24), 0.5);
   assert.equal(attenuationForDistance(48), 0);
   assert.equal(panForPosition({ x: 0, y: 0, z: 0 }, { x: 5, y: 0, z: 0 }), 1);
-  assert.ok(Math.abs(panForPosition({ x: 0, y: 0, z: 0, yaw: Math.PI / 2 }, { x: 0, y: 0, z: 5 }) - 1) < 1e-9);
+  assert.ok(Math.abs(panForPosition({ x: 0, y: 0, z: 0, yaw: Math.PI / 2 }, { x: 0, y: 0, z: 5 }) + 1) < 1e-9);
 });
 
 test('mixer layers different speakers, serializes each speaker, and caps active sources', () => {

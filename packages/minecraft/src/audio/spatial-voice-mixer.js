@@ -15,7 +15,7 @@ export function panForPosition(listener, source) {
   const length = Math.hypot(dx, dz);
   if (length === 0) return 0;
   const yaw = Number.isFinite(listener.yaw) ? listener.yaw : 0;
-  return Math.max(-1, Math.min(1, (dx * Math.cos(yaw) + dz * Math.sin(yaw)) / length));
+  return Math.max(-1, Math.min(1, (dx * Math.cos(yaw) - dz * Math.sin(yaw)) / length));
 }
 
 /** A bounded WebAudio mixer with one FIFO per speaker and a global source cap. */
