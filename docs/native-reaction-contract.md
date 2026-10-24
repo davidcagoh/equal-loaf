@@ -12,7 +12,7 @@ The player-transcription path remains separately opt-in under `.31.1`. A complet
 
 ## End-to-end lifecycle
 
-1. **Activate native audio and bootstrap sessions.** The browser calls the session manager only from a trusted user talk/audio gesture handler, and resumes audio playback there; the request itself is not proof of activation. The server validates same-origin requests, selects eligible nearby residents from authoritative world state, enforces the configured activation/session limits, and returns server-bound session identities and short-lived credentials through a bounded handshake. Credentials cannot be replayed to create additional sessions. The client opens those sessions and per-session reaction streams; no microphone capture occurs. The manager reconnects or tears down sessions under the lifecycle rules above. A session bootstrap failure leaves that resident ineligible and does not create a reaction slot. Browser autoplay policy still requires the intentional gesture before audio playback.
+1. **Activate native audio and bootstrap sessions.** From a trusted user talk/audio gesture handler, the browser resumes audio and POSTs `{}` to `/boson-ptt/native-audio/activate`; the request itself is not proof of activation. The server validates same-origin requests and uses the latest engine-authored `village.residents` snapshot to select nearby residents. The exact snapshot is `{type:'village.residents',timestamp,playerPosition:{x,y,z},residents:[{residentId,name,position:{x,y,z}}]}`; it includes no client-supplied positions, and the server fails closed unless its `timestamp` is at most 1,500 ms old. The engine emits snapshots at least once per second while available. The server selects residents within 24 blocks, returns at most four sessions, and enforces activation/session limits. Credentials are short-lived and cannot be replayed to create additional sessions. The activation reply is `{available:true,activationId,sessions:[{residentSessionId,residentId,shortLivedCredential,expiresAt,reactionStream}]}`, with the SSE URL `/boson-ptt/reaction/stream?residentSessionId=...`; `activationId` is server-issued. Deactivate with POST `/boson-ptt/native-audio/deactivate` `{activationId}`. The client opens those sessions and per-session reaction streams; no microphone capture occurs. The manager reconnects or tears down sessions under the lifecycle rules above. A session bootstrap failure leaves that resident ineligible and does not create a reaction slot. Browser autoplay policy still requires the intentional gesture before audio playback.
 
 2. **Create an eligible event in the engine.** Enqueue one event when a resident enters a meaningful routine activity, not on every routine polling tick. Also enqueue a newly perceived completed speech event for each eligible listener. The event carries a stable engine `eventId`, `residentId`, source/origin, causal depth, bounded private context, creation time, and expiry. Do not include client-supplied position, speaker identity, or a session ID.
 
@@ -22,7 +22,7 @@ The player-transcription path remains separately opt-in under `.31.1`. A complet
 
 4. **Ask the server to dispatch.** The engine emits a bounded `village.native.reaction` candidate with its engine-owned `eventId`, `residentId`, source/origin, causal depth, context, creation time, and expiry. The relay forwards it to the same-origin viewer server. The server resolves the resident's existing `residentSessionId`; the engine event and browser never choose that binding.
 
-   If there is no bound, connected resident Realtime session or no open reaction stream, the server returns an unavailable result to the engine so it releases/drops that event. The engine must also release on dispatch timeout or stream loss; deleting only the server's correlation entry would strand the per-resident active slot.
+   If there is no bound, connected resident Realtime session or no open reaction stream, the server returns an unavailable result to the engine so it releases/drops that event. Before browser dispatch, correlate this failure only by the unique `eventId` and `residentId`; omit `reactionId` because no browser correlation was created. Post-dispatch browser ACKs include the server-issued `reactionId`. The engine must also release on dispatch timeout or stream loss; deleting only the server's correlation entry would strand the per-resident active slot.
 
 5. **Issue a server correlation and send only to that session.** For a dispatchable candidate, the server creates a random `reactionId` and short-lived mapping:
 
@@ -66,18 +66,20 @@ Steps 1 and 2 can proceed in parallel after the schema is agreed; step 3 can als
 These names describe the boundary; server-issued correlation always wins over client fields. The session activation request carries no resident IDs or positions; the server selects residents from authoritative world state. These shapes are proposals to freeze before implementation:
 
 ```text
-client activation: POST native-audio/activate {} (called only inside trusted browser gesture handler)
-activation reply:  {activationId, sessions: [{residentSessionId, residentId, shortLivedCredential, reactionStream}]} (activationId server-issued)
-client deactivate: POST native-audio/deactivate {activationId}
-engine stdout:   village.native.reaction {version, eventId, residentId, origin, causalDepth, context, createdAt, expiresAt}
-browser SSE:     native.reaction.dispatch {reactionId, eventId, residentId, context, causalDepth, expiresAt}
-browser ACK:     POST reaction/ack {reactionId, residentSessionId, status}
-browser start:   POST reaction/speech/start {reactionId, residentSessionId, responseId, itemId}
-browser finish:  POST reaction/speech/finish {reactionId, residentSessionId, responseId, itemId, playback, transcript?}
-engine IPC:      reactionId + server-resolved eventId/residentId + status or provider output correlation
+client activation: POST /boson-ptt/native-audio/activate {} (trusted browser gesture handler only)
+activation reply:  {available:true,activationId,sessions:[{residentSessionId,residentId,shortLivedCredential,expiresAt,reactionStream}]} (server-issued ID, max four sessions; credential expiresAt is Unix seconds)
+client deactivate: POST /boson-ptt/native-audio/deactivate {activationId}
+resident SSE:      GET /boson-ptt/reaction/stream?residentSessionId=...; event native-reaction data {version:1,type:'native.reaction.dispatch',reactionId,eventId,residentId,context,causalDepth,expiresAt}
+engine stdout:   village.native.reaction {version, eventId, residentId, origin, causalDepth, context, createdAt, expiresAt} (createdAt/expiresAt are Unix milliseconds)
+browser ACK:     POST /boson-ptt/reaction/ack {reactionId,residentSessionId,status}
+browser start:   POST /boson-ptt/reaction/speech/start {reactionId,residentSessionId,responseId,itemId}
+browser finish:  POST /boson-ptt/reaction/speech/finish {reactionId,residentSessionId,responseId,itemId,playback,transcript?}
+engine IPC pre-dispatch failure: ptt.reaction.ack {version,eventId,residentId,status:'unavailable',at} (no reactionId)
+engine IPC browser ACK: ptt.reaction.ack {version,eventId,residentId,reactionId,status,at}
+engine IPC speech: ptt.reaction.speech.start/finish {version,eventId,residentId,reactionId,responseId,itemId,playback?,transcript?,at}
 ```
 
-All handlers use exact-key validation, same-origin checks, byte limits, bounded IDs, deduplication, and expiry. Client positions and speaker IDs are never accepted as authoritative. Reactions are separate from PTT `turnId` lifecycle.
+All handlers use exact-key validation, same-origin checks, byte limits, bounded IDs, deduplication, and expiry. The `village.residents.timestamp` and reaction event times use Unix milliseconds; activation credential `expiresAt` uses Unix seconds. A pre-dispatch ACK may omit `reactionId` only for `status:'unavailable'`; all browser-path ACK/start/finish messages carry it. Client positions and speaker IDs are never accepted as authoritative. Reactions are separate from PTT `turnId` lifecycle.
 
 ## Required tests and acceptance
 

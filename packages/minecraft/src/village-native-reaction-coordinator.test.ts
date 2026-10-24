@@ -50,6 +50,19 @@ test('routine entry and fresh heard events dispatch through the production coord
   assert.ok(candidates.slice(1).every(({ origin }) => origin === 'player'));
 });
 
+test('resident busy state waits for PTT to finish before dispatching queued reactions', () => {
+  let now = 2_000;
+  const { coordinator, candidates } = createCoordinator(() => now);
+  coordinator.setResidentBusy('mira', true);
+  coordinator.routineEntered({ eventId: 'routine_mira_busy', residentId: 'mira', activity: 'walking', motivation: 'visit neighbors', at: now });
+  assert.equal(candidates.length, 0);
+
+  now += 10;
+  coordinator.setResidentBusy('mira', false);
+  assert.equal(candidates.length, 1);
+  assert.equal(candidates[0]?.residentId, 'mira');
+});
+
 test('accepted dispatch completes only after playback and records continuously audible recipients', () => {
   let now = 10_000;
   const { coordinator, candidates, perceived } = createCoordinator(() => now, ['mira', 'tobin', 'pip']);
@@ -67,7 +80,7 @@ test('accepted dispatch completes only after playback and records continuously a
     version: 1, type: 'ptt.reaction.speech.start', eventId: String(candidate.eventId), residentId: 'mira',
     reactionId, responseId: 'response_1', itemId: 'item_1', at: ++now,
   }).status, 'started');
-  coordinator.samplePlayback();
+  coordinator.sampleActivePlayback();
   const finished = coordinator.handle({
     version: 1, type: 'ptt.reaction.speech.finish', eventId: String(candidate.eventId), residentId: 'mira',
     reactionId, responseId: 'response_1', itemId: 'item_1', playback: 'completed', transcript: 'The well path is clear.', at: ++now,
@@ -77,7 +90,40 @@ test('accepted dispatch completes only after playback and records continuously a
   assert.equal(perceived.length, 1);
   assert.deepEqual(perceived[0]?.recipientIds, ['tobin', 'pip']);
   assert.equal(perceived[0]?.speakerId, 'mira');
-  assert.equal(coordinator.activeCount, 0);
+  assert.equal(coordinator.activeCount, 2, 'the two continuously audible residents receive independent reactions');
+});
+
+test('hearing projection excludes residents who leave range during playback', () => {
+  let now = 15_000;
+  let sampleNumber = 0;
+  const perceived: Array<Record<string, unknown>> = [];
+  const candidates: Array<Record<string, unknown>> = [];
+  const coordinator = new NativeResidentReactionCoordinator({
+    now: () => now,
+    emitCandidate: (candidate) => candidates.push(candidate),
+    rememberHeardSpeech: (event) => perceived.push(event),
+    residentName: (residentId) => residentId.toUpperCase(),
+    samplePlayback: (speakerId) => {
+      sampleNumber += 1;
+      return {
+        tick: now + sampleNumber,
+        speakerPosition: { x: 0, y: 0, z: 0 },
+        residents: ['mira', 'tobin', 'pip'].map((residentId) => ({
+          residentId,
+          position: { x: residentId === speakerId ? 0 : residentId === 'tobin' && sampleNumber === 2 ? 20 : 2, y: 0, z: 0 },
+        })),
+      };
+    },
+  });
+  coordinator.routineEntered({ eventId: 'routine_mira_earshot', residentId: 'mira', activity: 'watering', motivation: 'care for plants', at: now });
+  const candidate = candidates[0]!;
+  const correlation = { eventId: String(candidate.eventId), residentId: 'mira', reactionId: 'reaction_00006' };
+  coordinator.handle({ version: 1, type: 'ptt.reaction.ack', ...correlation, status: 'accepted', at: ++now });
+  coordinator.handle({ version: 1, type: 'ptt.reaction.speech.start', ...correlation, responseId: 'response_6', itemId: 'item_6', at: ++now });
+  coordinator.sampleActivePlayback();
+  coordinator.handle({ version: 1, type: 'ptt.reaction.speech.finish', ...correlation, responseId: 'response_6', itemId: 'item_6', playback: 'completed', transcript: 'The leaves need water.', at: ++now });
+
+  assert.deepEqual(perceived[0]?.recipientIds, ['pip']);
 });
 
 test('interruption, timeout, and duplicate terminal reports release once without heard memory', () => {
@@ -109,6 +155,20 @@ test('interruption, timeout, and duplicate terminal reports release once without
   assert.equal(perceived.length, 0);
 });
 
+test('unavailable ACK after acceptance releases a reaction that never started audio', () => {
+  let now = 25_000;
+  const { coordinator, candidates, perceived } = createCoordinator(() => now);
+  coordinator.routineEntered({ eventId: 'routine_pip_before_audio', residentId: 'pip', activity: 'setting out bread', motivation: 'welcome neighbors', at: now });
+  const candidate = candidates[0]!;
+  const correlation = {
+    eventId: String(candidate.eventId), residentId: 'pip', reactionId: 'reaction_00005',
+  };
+  assert.equal(coordinator.handle({ version: 1, type: 'ptt.reaction.ack', ...correlation, status: 'accepted', at: ++now }).status, 'accepted');
+  assert.equal(coordinator.handle({ version: 1, type: 'ptt.reaction.ack', ...correlation, status: 'unavailable', at: ++now }).status, 'unavailable');
+  assert.equal(coordinator.activeCount, 0);
+  assert.equal(perceived.length, 0);
+});
+
 test('a reaction can cause one further response, whose hearing is remembered without another enqueue', () => {
   let now = 30_000;
   const { coordinator, candidates, perceived } = createCoordinator(() => now, ['mira', 'tobin', 'pip']);
@@ -120,7 +180,7 @@ test('a reaction can cause one further response, whose hearing is remembered wit
     const residentId = String(candidate.residentId);
     coordinator.handle({ version: 1, type: 'ptt.reaction.ack', eventId, residentId, reactionId, status: 'accepted', at: ++now });
     coordinator.handle({ version: 1, type: 'ptt.reaction.speech.start', eventId, residentId, reactionId, responseId: `response_${candidateIndex}`, itemId: `item_${candidateIndex}`, at: ++now });
-    coordinator.samplePlayback();
+    coordinator.sampleActivePlayback();
     coordinator.handle({ version: 1, type: 'ptt.reaction.speech.finish', eventId, residentId, reactionId,
       responseId: `response_${candidateIndex}`, itemId: `item_${candidateIndex}`, playback: 'completed', transcript, at: ++now });
   };

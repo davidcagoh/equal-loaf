@@ -214,7 +214,8 @@ export class ResidentNativeReactionPolicy {
         expired.push({ residentId, eventId: state.active.eventId });
         state.active = undefined;
       }
-      if (state.pending.length === 0 && !state.active && state.seen.size === 0 && state.lastCompletedAt === undefined) {
+      if (state.pending.length === 0 && !state.active && state.seen.size === 0
+        && (state.lastCompletedAt === undefined || now - state.lastCompletedAt >= this.#cooldownMs)) {
         this.#states.delete(residentId);
       }
     }
