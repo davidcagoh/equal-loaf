@@ -429,6 +429,7 @@ export async function startPttAudioHarness({ port = 0, host = '127.0.0.1', provi
       ['/boson-audio.js', new URL('../packages/minecraft/src/viewer-audio.js', import.meta.url)],
       ['/ptt-audio-test-view.js', new URL('../boson-api-demo/ptt-audio-test-view.js', import.meta.url)],
       ['/ptt-native-audio.js', new URL('../boson-api-demo/ptt-native-audio.js', import.meta.url)],
+      ['/native-response-playback.js', new URL('../boson-api-demo/native-response-playback.js', import.meta.url)],
       ['/audio/spatial-voice-mixer.js', new URL('../packages/minecraft/src/audio/spatial-voice-mixer.js', import.meta.url)],
     ]);
     if (request.method === 'GET' && assets.has(pathname)) {

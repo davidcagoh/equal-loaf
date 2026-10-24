@@ -48,6 +48,8 @@ test('isolated audio harness serves production modules behind local security and
     '/boson-ptt.js',
     '/boson-audio.js',
     '/ptt-audio-test-view.js',
+    '/ptt-native-audio.js',
+    '/native-response-playback.js',
     '/boson-ptt-worklet.js',
     '/village-vocabulary.js',
     '/audio/spatial-voice-mixer.js',
@@ -62,6 +64,14 @@ test('isolated audio harness serves production modules behind local security and
       assert.match(script, /Microphone permission was denied or blocked/);
       assert.match(script, /response_text_multiple_parts/);
       assert.match(script, /appendBoundedPttText/);
+    }
+    if (asset === '/ptt-native-audio.js') {
+      assert.match(await response.text(), /from '\.\/native-response-playback\.js'/);
+    }
+    if (asset === '/native-response-playback.js') {
+      const moduleSource = await response.text();
+      assert.match(moduleSource, /createNativeResponsePlayback/);
+      assert.match(moduleSource, /calculatePlayedAudioEndMs/);
     }
   }
 

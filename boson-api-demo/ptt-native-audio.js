@@ -1,3 +1,5 @@
+import { audioOutputTime, createNativeResponsePlayback } from './native-response-playback.js';
+
 const RATE = 24_000;
 const REALTIME_URL = 'wss://api.boson.ai/v1/realtime';
 const MAX_DELTA_BASE64_CHARS = 256_000;
@@ -68,6 +70,10 @@ function safeProviderCode(value) {
     ? value : 'provider_error';
 }
 
+function safeProviderId(value) {
+  return typeof value === 'string' && /^[A-Za-z0-9:_-]{1,128}$/.test(value) ? value : null;
+}
+
 function formatDuration(seconds) {
   if (!Number.isFinite(seconds) || seconds < 0) return '0:00';
   const total = Math.floor(seconds);
@@ -97,6 +103,10 @@ function bootNativePtt() {
     sessionStarting: false,
     waitingForCommit: false,
     responseInProgress: false,
+    activeResponseId: null,
+    interruptionPending: null,
+    commitAfterInterruption: false,
+    cancelRequestedAt: 0,
     inputSamples: 0,
     outputSamples: 0,
     turns: 0,
@@ -105,6 +115,8 @@ function bootNativePtt() {
     queuedOutputSeconds: 0,
     responseOutputSeconds: 0,
     playingSources: new Set(),
+    stoppedOutputResponses: new Set(),
+    responsePlayback: createNativeResponsePlayback(),
     providerTokens: null,
     timers: new Set(),
     workletReady: null,
@@ -143,8 +155,7 @@ function bootNativePtt() {
   const refreshControls = () => {
     startButton.disabled = state.sessionStarting || Boolean(state.sessionId);
     endButton.disabled = !state.sessionId && !state.sessionStarting;
-    talkButton.disabled = !state.sessionReady || state.waitingForCommit || state.responseInProgress
-      || (state.playingSources.size > 0 && !state.held);
+    talkButton.disabled = !state.sessionReady || state.waitingForCommit;
     talkButton.textContent = state.held ? 'Release to send' : 'Hold P to talk';
     talkButton.setAttribute('aria-pressed', String(state.held));
   };
@@ -154,12 +165,16 @@ function bootNativePtt() {
     return true;
   };
   const stopOutput = () => {
-    for (const source of state.playingSources) {
-      try { source.stop(); } catch { /* already ended */ }
+    for (const record of state.playingSources) {
+      state.stoppedOutputResponses.add(record.responseId);
+      try { record.source.stop(); } catch { /* already ended */ }
     }
     state.playingSources.clear();
     state.queuedOutputSeconds = 0;
     state.playHead = state.audioContext?.currentTime ?? 0;
+  };
+  const outputPlaybackTime = () => {
+    return audioOutputTime(state.audioContext);
   };
   const stopCapture = () => {
     const capture = state.capture;
@@ -177,10 +192,16 @@ function bootNativePtt() {
     state.held = false;
     state.holdSource = null;
     state.waitingForCommit = false;
+    state.activeResponseId = null;
+    state.interruptionPending = null;
+    state.commitAfterInterruption = false;
+    state.cancelRequestedAt = 0;
     state.sessionReady = false;
     state.responseInProgress = false;
     stopCapture();
     stopOutput();
+    state.responsePlayback.reset();
+    state.stoppedOutputResponses.clear();
     for (const timer of state.timers) clearTimeout(timer);
     state.timers.clear();
     if (state.ackTimer) clearTimeout(state.ackTimer);
@@ -219,8 +240,40 @@ function bootNativePtt() {
     diagnostic(`Session ended · ${safeCode}`);
     void closeSession(`Session ended · ${safeCode}`);
   };
-  const scheduleOutput = (encoded) => {
+  const finalizeInterruption = (responseId) => {
+    const pending = state.interruptionPending;
+    if (!pending || (pending.responseId && pending.responseId !== responseId)) return;
+    const result = state.responsePlayback.finish(responseId);
+    if (result?.truncate) send(result.truncate);
+    if (pending.responseId) state.responsePlayback.clear(pending.responseId);
+    state.interruptionPending = null;
+    if (state.commitAfterInterruption && state.held === false && state.waitingForCommit) {
+      state.commitAfterInterruption = false;
+      if (!send({ type: 'input_audio_buffer.commit' })) failSession('input_commit_failed');
+    }
+  };
+  const interruptOutput = () => {
+    const interruption = state.responsePlayback.interrupt(outputPlaybackTime());
+    const hadUntrackedResponse = state.responseInProgress && !interruption;
+    stopOutput();
+    if (interruption?.cancel || hadUntrackedResponse) {
+      state.interruptionPending = { responseId: interruption?.responseId ?? null };
+      state.cancelRequestedAt = Date.now();
+      if (!send({ type: 'response.cancel' })) failSession('response_cancel_failed');
+    } else if (interruption?.truncate) {
+      if (!send(interruption.truncate)) failSession('response_truncate_failed');
+      state.responsePlayback.clear(interruption.responseId);
+    }
+    if (interruption || hadUntrackedResponse) {
+      state.responseInProgress = false;
+      state.activeResponseId = null;
+      status('response-state', 'Reply interrupted · listening.', 'good');
+    }
+  };
+  const scheduleOutput = (encoded, event) => {
     if (!state.audioContext) return false;
+    const responseId = safeProviderId(event.response_id) ?? state.activeResponseId;
+    if (!responseId || !state.responsePlayback.acceptsAudio(responseId)) return true;
     const samples = decodePcm16Base64Audio(encoded);
     if (!samples) return false;
     const duration = samples.length / RATE;
@@ -236,11 +289,23 @@ function bootNativePtt() {
     state.queuedOutputSeconds += duration;
     state.responseOutputSeconds += duration;
     state.outputSamples += samples.length;
-    state.playingSources.add(source);
+    const record = { source, responseId };
+    state.playingSources.add(record);
+    state.responsePlayback.addChunk(responseId, {
+      itemId: safeProviderId(event.item_id),
+      contentIndex: Number.isSafeInteger(event.content_index) ? event.content_index : 0,
+      startAt,
+      duration,
+    });
     source.onended = () => {
-      state.playingSources.delete(source);
+      state.playingSources.delete(record);
       state.queuedOutputSeconds = Math.max(0, state.queuedOutputSeconds - duration);
-      if (!state.responseInProgress && state.playingSources.size === 0 && state.sessionReady) {
+      if (state.stoppedOutputResponses.has(responseId)) {
+        if (![...state.playingSources].some((item) => item.responseId === responseId)) state.stoppedOutputResponses.delete(responseId);
+        return;
+      }
+      if (!state.responseInProgress && ![...state.playingSources].some((item) => item.responseId === responseId) && state.sessionReady) {
+        state.responsePlayback.clear(responseId);
         status('response-state', 'Reply finished · hold P to continue.', 'good');
         refreshControls();
       }
@@ -279,17 +344,18 @@ function bootNativePtt() {
       return;
     }
     if (event.type === 'response.created') {
+      const responseId = safeProviderId(event.response?.id ?? event.response_id);
+      if (!responseId || !state.responsePlayback.begin(responseId)) return;
+      state.activeResponseId = responseId;
       state.responseInProgress = true;
       status('response-state', 'Anna is replying in native audio.', 'good');
       refreshControls();
       return;
     }
     if (event.type === 'response.output_audio.delta') {
-      if (!scheduleOutput(event.delta)) {
+      if (!scheduleOutput(event.delta, event)) {
         diagnostic('Audio response stopped at the local output buffer limit.');
-        send({ type: 'response.cancel' });
-        stopOutput();
-        state.responseInProgress = false;
+        interruptOutput();
         status('response-state', 'Response stopped · audio buffer limit reached.', 'warn');
         refreshControls();
       }
@@ -297,15 +363,23 @@ function bootNativePtt() {
     }
     if (event.type === 'response.output_audio_transcript.delta' && typeof event.delta === 'string'
       && event.delta.length > 0 && event.delta.length <= 2_048) {
-      const safeId = (value) => typeof value === 'string' && /^[A-Za-z0-9:_-]{1,128}$/.test(value) ? value : null;
+      const responseId = safeProviderId(event.response_id) ?? state.activeResponseId;
+      if (!responseId || !state.responsePlayback.acceptsAudio(responseId)) return;
       window.dispatchEvent(new CustomEvent('native-ptt-transcript-delta', {
-        detail: { speakerId: 'mira', responseId: safeId(event.response_id), itemId: safeId(event.item_id), delta: event.delta },
+        detail: { speakerId: 'mira', responseId, itemId: safeProviderId(event.item_id), delta: event.delta },
       }));
       return;
     }
     if (event.type === 'response.done') {
+      const responseId = safeProviderId(event.response?.id ?? event.response_id)
+        ?? state.interruptionPending?.responseId ?? state.activeResponseId;
+      const interruptedCompletion = Boolean(state.interruptionPending);
+      if (responseId) {
+        if (state.interruptionPending) finalizeInterruption(responseId);
+        else state.responsePlayback.finish(responseId);
+        if (state.activeResponseId === responseId) state.activeResponseId = null;
+      }
       state.responseInProgress = false;
-      state.waitingForCommit = false;
       state.turns += 1;
       const response = event.response && typeof event.response === 'object' ? event.response : {};
       const responseTokens = summarizeRealtimeAudioUsage(response.usage);
@@ -318,15 +392,28 @@ function bootNativePtt() {
         diagnostic('Provider usage counters received; no response text retained.');
       }
       updateUsage();
-      status('turn-state', 'Microphone released.', 'good');
-      status('response-state', state.playingSources.size
-        ? 'Anna finished speaking generation · playing audio.'
-        : response.status === 'completed' ? 'Reply complete · hold P to continue.' : 'Turn ended without a completed reply.',
-      response.status === 'completed' ? 'good' : 'warn');
+      if (responseId && ![...state.playingSources].some((item) => item.responseId === responseId)) {
+        state.responsePlayback.clear(responseId);
+      }
+      if (!state.held) status('turn-state', 'Microphone released.', 'good');
+      if (interruptedCompletion) {
+        status('response-state', state.held ? 'Reply interrupted · listening.' : 'Reply interrupted · hold P to talk.', 'good');
+      } else {
+        status('response-state', state.playingSources.size
+          ? 'Anna finished speaking generation · playing audio.'
+          : response.status === 'completed' ? 'Reply complete · hold P to continue.' : 'Turn ended without a completed reply.',
+        response.status === 'completed' ? 'good' : 'warn');
+      }
       refreshControls();
       return;
     }
     if (event.type === 'error') {
+      if (safeProviderCode(event.error?.code) === 'response_cancel_not_active'
+        && state.cancelRequestedAt > 0 && Date.now() - state.cancelRequestedAt <= 5_000) {
+        if (state.interruptionPending) finalizeInterruption(state.interruptionPending.responseId);
+        state.cancelRequestedAt = 0;
+        return;
+      }
       failSession(event.error?.code);
     }
   };
@@ -415,8 +502,10 @@ function bootNativePtt() {
   };
 
   const startCapture = async () => {
-    if (!state.sessionReady || state.held || state.responseInProgress || state.playingSources.size) return;
+    if (!state.sessionReady || state.held || state.waitingForCommit) return;
     state.held = true;
+    interruptOutput();
+    if (!state.held || !state.sessionReady) return;
     status('turn-state', 'Microphone permission requested for this held turn…');
     refreshControls();
     let stream;
@@ -472,6 +561,10 @@ function bootNativePtt() {
     }
     state.waitingForCommit = true;
     status('turn-state', 'Microphone released · finishing this turn…', 'good');
+    if (state.interruptionPending) {
+      state.commitAfterInterruption = true;
+      return;
+    }
     if (!send({ type: 'input_audio_buffer.commit' })) {
       state.waitingForCommit = false;
       failSession('input_commit_failed');
