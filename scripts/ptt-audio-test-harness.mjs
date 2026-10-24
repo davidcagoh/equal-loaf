@@ -8,10 +8,17 @@ import { fileURLToPath, pathToFileURL } from 'node:url';
 import { createPttServer, isPttModelResponse, isSameOriginPttRequest } from '../packages/minecraft/src/viewer-ptt-server.ts';
 import { isVillageDialogue } from '../packages/minecraft/src/viewer-audio.js';
 import { createHiggsTtsHandler, RESIDENT_VOICES, TTS_CHARACTER_USD } from '../packages/minecraft/src/audio/higgs-tts.js';
+import { buildNativeResidentInstructions, equalLoafResidentFact } from '../packages/minecraft/src/native-resident-context.ts';
 
 const PROJECT_ROOT = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 const PAGE_PATH = join(PROJECT_ROOT, 'boson-api-demo', 'ptt-audio-test.html');
 const NATIVE_PAGE_PATH = join(PROJECT_ROOT, 'boson-api-demo', 'ptt-native-audio.html');
+const STORY_PAGE_PATH = join(PROJECT_ROOT, 'boson-api-demo', 'native-story-audio.html');
+const STORY_RESIDENTS = Object.freeze([
+  Object.freeze({ id: 'mira', name: 'Anna', role: 'garden helper', goal: 'help the village and speak up for the value of garden work', voice: 'chloe', topics: ['garden', 'work', 'fairness'] }),
+  Object.freeze({ id: 'tobin', name: 'James', role: 'map keeper', goal: 'keep village shares clear and easy to check', voice: 'oliver', topics: ['maps', 'households', 'fairness'] }),
+  Object.freeze({ id: 'pip', name: 'Thomas', role: 'baker', goal: 'make sure every household has bread and welcome newcomers', voice: 'jake', topics: ['bread', 'households', 'welcome'] }),
+]);
 const MAX_TEST_TURNS = 2;
 const MAX_HOLD_MS = 30_000;
 const MAX_TTS_REQUESTS = 2;
@@ -196,6 +203,7 @@ export async function startPttAudioHarness({ port = 0, host = '127.0.0.1', provi
   let ipcServer;
   let pageTemplate;
   let nativePageTemplate;
+  let storyPageTemplate;
   let httpServer;
   let stopped = false;
   let realtimeTurnsUsed = 0;
@@ -206,6 +214,9 @@ export async function startPttAudioHarness({ port = 0, host = '127.0.0.1', provi
   let mockFetch;
   let activeNativeSession = null;
   let nativeSessionStartInFlight = false;
+  const storySessions = new Map();
+  const storySessionsByResident = new Map();
+  const storyStartsInFlight = new Set();
   const dialogueClients = new Set();
   const dialogueByKey = new Map();
 
@@ -235,6 +246,9 @@ export async function startPttAudioHarness({ port = 0, host = '127.0.0.1', provi
     ttsServer?.close();
     for (const client of dialogueClients) client.end();
     dialogueClients.clear();
+    storySessions.clear();
+    storySessionsByResident.clear();
+    storyStartsInFlight.clear();
     await Promise.all([closeServer(httpServer), closeServer(ipcServer)]);
     await rm(tempDirectory, { recursive: true, force: true });
     if (previousSocketPath === undefined) delete process.env.BOSON_VILLAGE_IPC_SOCKET;
@@ -298,8 +312,13 @@ export async function startPttAudioHarness({ port = 0, host = '127.0.0.1', provi
       && request.headers['sec-fetch-mode'] === 'navigate'
       && request.headers['sec-fetch-dest'] === 'document'
       && !request.headers.origin;
-    if (!isLocalViewerRequest(request, viewerOrigins, allowedHosts) && !isTopLevelNavigation && !isNativeTopLevelNavigation) {
-      const detail = pathname === '/native' && request.method === 'GET'
+    const isStoryTopLevelNavigation = request.method === 'GET' && pathname === '/native-story'
+      && allowedHosts.has(request.headers.host)
+      && request.headers['sec-fetch-mode'] === 'navigate'
+      && request.headers['sec-fetch-dest'] === 'document'
+      && !request.headers.origin;
+    if (!isLocalViewerRequest(request, viewerOrigins, allowedHosts) && !isTopLevelNavigation && !isNativeTopLevelNavigation && !isStoryTopLevelNavigation) {
+      const detail = (pathname === '/native' || pathname === '/native-story') && request.method === 'GET'
         ? ` Safe request metadata: ${safeNativeNavigationDiagnostics(request, viewerOrigins, allowedHosts)}.` : '';
       response.writeHead(403).end(`Loopback same-origin requests only.${detail}`);
       return;
@@ -345,6 +364,99 @@ export async function startPttAudioHarness({ port = 0, host = '127.0.0.1', provi
       response.setHeader('Permissions-Policy', 'microphone=(self), camera=(), geolocation=()');
       response.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8' })
         .end(nativePageTemplate.replaceAll('__CSP_NONCE__', nonce));
+      return;
+    }
+
+    if (request.method === 'GET' && pathname === '/native-story') {
+      const nonce = randomBytes(18).toString('base64url');
+      response.setHeader('Content-Security-Policy', [
+        "default-src 'none'", `script-src 'self' 'nonce-${nonce}'`, `style-src 'self' 'nonce-${nonce}'`,
+        "connect-src 'self' wss://api.boson.ai", "worker-src 'self'", "media-src 'self' blob:",
+        "object-src 'none'", "base-uri 'none'", "form-action 'self'", "frame-ancestors 'none'",
+      ].join('; '));
+      response.setHeader('Permissions-Policy', 'microphone=(self), camera=(), geolocation=()');
+      response.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8' })
+        .end(storyPageTemplate.replaceAll('__CSP_NONCE__', nonce));
+      return;
+    }
+
+    if (pathname === '/native/story/residents' && request.method === 'GET') {
+      if (!isSameOriginPttRequest(request, viewerOrigins)) { json(response, 403, { available: false }); return; }
+      json(response, 200, { residents: STORY_RESIDENTS.map(({ id, name, role, voice }) => ({ residentId: id, name, role, voice })) });
+      return;
+    }
+
+    if (pathname === '/native/story/session/start' && request.method === 'POST') {
+      if (!isSameOriginPttRequest(request, viewerOrigins)) { json(response, 403, { available: false, error: 'Local same-origin native sessions only.' }); return; }
+      let body = '';
+      for await (const chunk of request) {
+        body += chunk;
+        if (Buffer.byteLength(body, 'utf8') > 1_024) { json(response, 413, { available: false, error: 'Invalid resident session request.' }); return; }
+      }
+      let requested;
+      try { requested = JSON.parse(body); } catch { requested = null; }
+      const resident = STORY_RESIDENTS.find(({ id }) => id === requested?.residentId);
+      if (!resident) { json(response, 400, { available: false, error: 'Choose a supported resident.' }); return; }
+      const now = Math.floor(Date.now() / 1_000);
+      const oldId = storySessionsByResident.get(resident.id);
+      const oldSession = oldId ? storySessions.get(oldId) : null;
+      if (oldSession && oldSession.leaseExpiresAt > now) {
+        json(response, 409, { available: false, error: 'This resident conversation is already active in this tester.' }); return;
+      }
+      if (oldId) { storySessions.delete(oldId); storySessionsByResident.delete(resident.id); }
+      if (storyStartsInFlight.has(resident.id)) { json(response, 409, { available: false, error: 'This resident conversation is starting.' }); return; }
+      if (!providerEnabled || !process.env.BOSON_API_KEY?.trim()) { json(response, 503, { available: false, error: 'Native Boson Realtime is not configured.' }); return; }
+      storyStartsInFlight.add(resident.id);
+      try {
+        const fetcher = mockRealtime ? realtimeFetcher : globalThis.fetch;
+        const result = await fetcher('https://api.boson.ai/v1/realtime/client_secrets', {
+          method: 'POST', headers: { authorization: `Bearer ${process.env.BOSON_API_KEY}`, 'content-type': 'application/json' },
+          body: JSON.stringify({ expires_after: { seconds: 300 } }), signal: AbortSignal.timeout(8_000),
+        });
+        const payload = await result.json();
+        if (!result.ok || !payload || typeof payload.value !== 'string' || !payload.value.startsWith('bai-eph-')
+          || !Number.isSafeInteger(payload.expires_at) || payload.expires_at <= now) {
+          json(response, 503, { available: false, error: 'Native Boson Realtime could not start.' }); return;
+        }
+        const residentSessionId = randomUUID();
+        const sessionId = randomUUID();
+        const leaseExpiresAt = Math.floor(Date.now() / 1_000) + 60;
+        storySessions.set(sessionId, { sessionId, residentSessionId, residentId: resident.id, leaseExpiresAt });
+        storySessionsByResident.set(resident.id, sessionId);
+        const instructions = buildNativeResidentInstructions({
+          id: resident.id, name: resident.name, role: resident.role, goal: resident.goal,
+          locationId: 'isolated-equal-loaf-test', topics: resident.topics,
+          facts: [equalLoafResidentFact(resident.id)], responseOptions: [], relationship: 'newcomer',
+        });
+        json(response, 200, { available: true, sessionId, residentSessionId, residentId: resident.id, name: resident.name,
+          voice: resident.voice, instructions, clientSecret: payload.value, expiresAt: payload.expires_at });
+      } catch {
+        json(response, 503, { available: false, error: 'Native Boson Realtime could not start.' });
+      } finally { storyStartsInFlight.delete(resident.id); }
+      return;
+    }
+
+    if (pathname === '/native/story/session/heartbeat' && request.method === 'POST') {
+      if (!isSameOriginPttRequest(request, viewerOrigins)) { json(response, 403, { active: false }); return; }
+      const session = storySessions.get(url.searchParams.get('sessionId'));
+      const now = Math.floor(Date.now() / 1_000);
+      if (!session || session.leaseExpiresAt <= now) {
+        if (session) { storySessions.delete(session.sessionId); storySessionsByResident.delete(session.residentId); }
+        json(response, 404, { active: false }); return;
+      }
+      session.leaseExpiresAt = now + 60;
+      json(response, 200, { active: true });
+      return;
+    }
+
+    if (pathname === '/native/story/session/end' && request.method === 'POST') {
+      if (!isSameOriginPttRequest(request, viewerOrigins)) { json(response, 403, { ended: false }); return; }
+      const sessionId = url.searchParams.get('sessionId');
+      const session = storySessions.get(sessionId);
+      if (!session) { json(response, 404, { ended: false }); return; }
+      storySessions.delete(sessionId);
+      if (storySessionsByResident.get(session.residentId) === sessionId) storySessionsByResident.delete(session.residentId);
+      json(response, 200, { ended: true });
       return;
     }
 
@@ -429,6 +541,7 @@ export async function startPttAudioHarness({ port = 0, host = '127.0.0.1', provi
       ['/boson-audio.js', new URL('../packages/minecraft/src/viewer-audio.js', import.meta.url)],
       ['/ptt-audio-test-view.js', new URL('../boson-api-demo/ptt-audio-test-view.js', import.meta.url)],
       ['/ptt-native-audio.js', new URL('../boson-api-demo/ptt-native-audio.js', import.meta.url)],
+      ['/native-story-audio.js', new URL('../boson-api-demo/native-story-audio.js', import.meta.url)],
       ['/native-response-playback.js', new URL('../boson-api-demo/native-response-playback.js', import.meta.url)],
       ['/audio/spatial-voice-mixer.js', new URL('../packages/minecraft/src/audio/spatial-voice-mixer.js', import.meta.url)],
     ]);
@@ -513,6 +626,7 @@ export async function startPttAudioHarness({ port = 0, host = '127.0.0.1', provi
   try {
     pageTemplate = await readFile(PAGE_PATH, 'utf8');
     nativePageTemplate = await readFile(NATIVE_PAGE_PATH, 'utf8');
+    storyPageTemplate = await readFile(STORY_PAGE_PATH, 'utf8');
     ipcServer = createFixedFixtureIpc(socketPath, onComplete);
     await new Promise((resolveListen, rejectListen) => {
       ipcServer.once('listening', resolveListen);

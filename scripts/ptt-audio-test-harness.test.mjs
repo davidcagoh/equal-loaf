@@ -247,6 +247,94 @@ test('native speech-to-speech session broker is local-only and keeps the API key
   assert.equal((await denied.json()).available, false);
 });
 
+test('Equal Loaf story tester lists three isolated residents and is safe while the provider is disabled', async (context) => {
+  const harness = await startPttAudioHarness({ providerEnabled: false });
+  context.after(() => harness.close());
+  const page = await fetch(new URL('/native-story', harness.url));
+  assert.equal(page.status, 200);
+  const html = await page.text();
+  assert.match(html, /Equal Loaf native conversation tester/);
+  assert.match(html, /equal-loaf-context-v1/);
+  assert.match(html, /Anna/);
+  assert.match(html, /James/);
+  assert.match(html, /Thomas/);
+  assert.match(html, /Hold P to talk/);
+  assert.match(html, /End conversations/);
+  assert.doesNotMatch(html, /The garden is growing well today|east beds need watering/);
+
+  const headers = { Origin: new URL(harness.url).origin, 'Sec-Fetch-Site': 'same-origin' };
+  const residentsResponse = await fetch(new URL('/native/story/residents', harness.url), { headers });
+  assert.equal(residentsResponse.status, 200);
+  const residents = await residentsResponse.json();
+  assert.deepEqual(residents.residents.map(({ residentId, name, voice }) => ({ residentId, name, voice })), [
+    { residentId: 'mira', name: 'Anna', voice: 'chloe' },
+    { residentId: 'tobin', name: 'James', voice: 'oliver' },
+    { residentId: 'pip', name: 'Thomas', voice: 'jake' },
+  ]);
+  const invalid = await fetch(new URL('/native/story/session/start', harness.url), {
+    method: 'POST', headers: { ...headers, 'Content-Type': 'application/json' },
+    body: JSON.stringify({ residentId: 'unknown' }),
+  });
+  assert.equal(invalid.status, 400);
+  const disabled = await fetch(new URL('/native/story/session/start', harness.url), {
+    method: 'POST', headers: { ...headers, 'Content-Type': 'application/json' },
+    body: JSON.stringify({ residentId: 'mira' }),
+  });
+  assert.equal(disabled.status, 503);
+  assert.equal((await disabled.json()).available, false);
+});
+
+test('story credentials use the shared resident prompt builder with private per-resident facts and voices', async (context) => {
+  let providerCalls = 0;
+  const harness = await startPttAudioHarness({
+    providerEnabled: true,
+    mockRealtime: true,
+    realtimeFetcher: async () => {
+      providerCalls += 1;
+      return Response.json({ value: `bai-eph-story-${providerCalls}`, expires_at: Math.floor(Date.now() / 1_000) + 300 });
+    },
+  });
+  context.after(() => harness.close());
+  const headers = { Origin: new URL(harness.url).origin, 'Sec-Fetch-Site': 'same-origin', 'Content-Type': 'application/json' };
+  const start = async (residentId) => fetch(new URL('/native/story/session/start', harness.url), {
+    method: 'POST', headers, body: JSON.stringify({ residentId }),
+  });
+  const annaResponse = await start('mira');
+  assert.equal(annaResponse.status, 200);
+  const anna = await annaResponse.json();
+  assert.equal(anna.name, 'Anna');
+  assert.equal(anna.voice, 'chloe');
+  assert.match(anna.instructions, /garden workers/);
+  assert.match(anna.instructions, /Speak and think freely/);
+  assert.doesNotMatch(anna.instructions, /household map/);
+  const duplicateAnna = await start('mira');
+  assert.equal(duplicateAnna.status, 409, 'one selected resident keeps one live conversation in the map');
+
+  const jamesResponse = await start('tobin');
+  assert.equal(jamesResponse.status, 200);
+  const james = await jamesResponse.json();
+  assert.equal(james.name, 'James');
+  assert.equal(james.voice, 'oliver');
+  assert.match(james.instructions, /map count gives one share/);
+  assert.doesNotMatch(james.instructions, /garden workers/);
+  assert.notEqual(anna.residentSessionId, james.residentSessionId);
+  const annaHeartbeat = await fetch(new URL(`/native/story/session/heartbeat?sessionId=${encodeURIComponent(anna.sessionId)}`, harness.url), {
+    method: 'POST', headers,
+  });
+  assert.equal(annaHeartbeat.status, 200, 'switching to James leaves Anna’s separate session active');
+  const endAnna = await fetch(new URL(`/native/story/session/end?sessionId=${encodeURIComponent(anna.sessionId)}`, harness.url), {
+    method: 'POST', headers,
+  });
+  assert.equal(endAnna.status, 200);
+  assert.equal((await fetch(new URL(`/native/story/session/heartbeat?sessionId=${encodeURIComponent(james.sessionId)}`, harness.url), {
+    method: 'POST', headers,
+  })).status, 200, 'ending Anna leaves James active');
+  const restartedAnna = await start('mira');
+  assert.equal(restartedAnna.status, 200);
+  assert.notEqual((await restartedAnna.json()).residentSessionId, anna.residentSessionId);
+  assert.equal(providerCalls, 3);
+});
+
 test('native session issues one ephemeral secret per active conversation and permits restart after stop', async (context) => {
   let calls = 0;
   const harness = await startPttAudioHarness({
