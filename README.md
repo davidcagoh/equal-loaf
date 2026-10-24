@@ -1,6 +1,6 @@
 # Equal Loaf
 
-Local Minecraft village demo for the **Conversation as the Interface** track. The default viewer keeps its existing ambient audio and push-to-talk interface. The native resident audio path is opt-in and supports one selected nearby resident at a time; the owner has accepted this one-to-one proximity behavior. Dialogue timing around the dawn bell remains rough. Autonomous multi-party resident conversations are not implemented.
+Local Minecraft village demo for the **Conversation as the Interface** track. The default viewer keeps its existing ambient audio and push-to-talk interface. The native resident audio path is opt-in and supports one selected nearby resident at a time; the owner has accepted that proximity interaction. This acceptance covers one-to-one proximity behavior, not full conversation quality; dialogue timing around the dawn bell remains rough. Autonomous multi-party resident conversations are not implemented.
 
 ## Quickstart
 
