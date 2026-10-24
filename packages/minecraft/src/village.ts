@@ -23,6 +23,7 @@ import {
   type VillagePttCommand,
 } from './village-event.ts';
 import { villageDialogue, villageMysteryDialogue, villageProfiles } from './village-profiles.ts';
+import { createRoutineWorldObservation } from './village-observations.ts';
 import { distance3d, isWithinExplorerWatchRange, rendezvousExchange, shouldPauseForExplorer, VillageAi } from './village-ai.ts';
 
 // Optional explicit env file keeps credentials in the local launcher process only.
@@ -56,6 +57,7 @@ const MAX_ACTIVE_PTT_TURNS = 8;
 const ai = new VillageAi({ enabled: process.env.BOSON_VILLAGE_AI === '1', jevKey: process.env.TYPESAFE_API_KEY, gatewayKey: process.env.AI_GATEWAY_API_KEY });
 const plannedLineIds = new Map<string, string>();
 let dialogueSequence = 0;
+let routineObservationSequence = 0;
 const explorerName = process.env.BOSON_MC_PLAYER ?? 'DemoPlayer';
 
 function explorerFor(bot: NonNullable<ReturnType<typeof bots.get>>) {
@@ -455,6 +457,22 @@ async function runResidentRoutine(profile: typeof villageProfiles[number], index
     }
     try {
       await bot.pathfinder.goto(new goals.GoalNear(x, y, z, 1));
+      const observerPosition = bot.entity?.position;
+      if (observerPosition) {
+        const observation = createRoutineWorldObservation({
+          stopId: stopAt.id,
+          eventId: `routine-observation-${profile.id}-${++routineObservationSequence}`,
+          tick: Date.now(),
+          observerPosition: { x: observerPosition.x, y: observerPosition.y, z: observerPosition.z },
+          hearingRadius: RESIDENT_HEARING_RADIUS,
+          residents: villageProfiles.flatMap(({ id }) => {
+            const residentBot = bots.get(id);
+            const position = residentBot?.entity?.position;
+            return position ? [{ id, position: { x: position.x, y: position.y, z: position.z } }] : [];
+          }),
+        });
+        if (observation) cognitionState.current = reduceVillageObservation(cognitionState.current, observation);
+      }
     } catch (error) {
       if (!stopping) process.stderr.write(`${profile.username} routine paused: ${error instanceof Error ? error.message : String(error)}\n`);
     }
