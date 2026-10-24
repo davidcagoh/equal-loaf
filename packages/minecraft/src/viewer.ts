@@ -103,6 +103,16 @@ export function applyExplorerControls(bot: ViewerBot): () => void {
 
 const require = createRequire(import.meta.url);
 
+function serveViewerSource(response: ServerResponse, source: URL, contentType: string): void {
+  try {
+    const content = readFileSync(source);
+    response.writeHead(200, { 'Content-Type': contentType, 'Cache-Control': 'no-cache' }).end(content);
+  } catch {
+    response.writeHead(503, { 'Content-Type': 'text/plain; charset=utf-8', 'Cache-Control': 'no-store' })
+      .end('Viewer audio module is unavailable.');
+  }
+}
+
 function restrictViewerRequests(server: Server, port: number, pttServer: ReturnType<typeof createPttServer>, ttsServer: ReturnType<typeof createHiggsTtsHandler>, recentDialogue: Map<string, { eventId?: string; speakerId: string; lineId?: string; line: string }>): () => void {
   const viewerOrigins = new Set([`http://127.0.0.1:${port}`, `http://localhost:${port}`]);
   const documentOrigins = new Set([...viewerOrigins, 'http://127.0.0.1:8000', 'http://localhost:8000']);
@@ -115,6 +125,7 @@ function restrictViewerRequests(server: Server, port: number, pttServer: ReturnT
   const viewerClients = new Set<Duplex>();
   const viewerIndex = readFileSync(require.resolve('prismarine-viewer/public/index.html'), 'utf8');
   const viewerPage = viewerIndex.replace('</body>', '<script src="/socket.io/socket.io.js"></script><script type="module" src="/boson-controls.js"></script><script type="module" src="/boson-audio.js"></script><script type="module" src="/boson-ptt.js"></script></body>');
+  const nativeResidentViewerPage = viewerIndex.replace('</body>', '<script src="/socket.io/socket.io.js"></script><script type="module" src="/boson-controls.js"></script><script type="module" src="/boson-ptt-native.js"></script></body>');
 
   const routeDialogue = (request: IncomingMessage, response: ServerResponse): boolean => {
     if (request.url?.split('?')[0] !== '/boson-dialogue') return false;
@@ -255,8 +266,14 @@ function restrictViewerRequests(server: Server, port: number, pttServer: ReturnT
           .end(readFileSync(new URL('./viewer-ptt-worklet.js', import.meta.url)));
         return true;
       }
-      if (request.method === 'GET' && (request.url === '/' || request.url === '/index.html')) {
-        response.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8' }).end(viewerPage);
+      if (request.method === 'GET' && (request.url?.split('?')[0] === '/' || request.url?.split('?')[0] === '/index.html')) {
+        const nativeResidentAudio = new URL(request.url ?? '/', `http://127.0.0.1:${port}`).searchParams.get('nativeResidentAudio') === '1';
+        response.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8' })
+          .end(nativeResidentAudio ? nativeResidentViewerPage : viewerPage);
+        return true;
+      }
+      if (request.method === 'GET' && request.url === '/boson-ptt-native.js') {
+        serveViewerSource(response, new URL('./viewer-ptt-native.js', import.meta.url), 'text/javascript; charset=utf-8');
         return true;
       }
       if (request.method === 'GET' && request.url === '/boson-audio.js') {
@@ -267,6 +284,18 @@ function restrictViewerRequests(server: Server, port: number, pttServer: ReturnT
       if (request.method === 'GET' && request.url === '/audio/spatial-voice-mixer.js') {
         response.writeHead(200, { 'Content-Type': 'text/javascript; charset=utf-8', 'Cache-Control': 'no-cache' })
           .end(readFileSync(new URL('./audio/spatial-voice-mixer.js', import.meta.url)));
+        return true;
+      }
+      if (request.method === 'GET' && request.url === '/audio/native-realtime-core.js') {
+        serveViewerSource(response, new URL('./audio/native-realtime-core.js', import.meta.url), 'text/javascript; charset=utf-8');
+        return true;
+      }
+      if (request.method === 'GET' && request.url === '/audio/native-resident-pcm-mixer.js') {
+        serveViewerSource(response, new URL('./audio/native-resident-pcm-mixer.js', import.meta.url), 'text/javascript; charset=utf-8');
+        return true;
+      }
+      if (request.method === 'GET' && request.url === '/audio/native-response-playback.js') {
+        serveViewerSource(response, new URL('../../../boson-api-demo/native-response-playback.js', import.meta.url), 'text/javascript; charset=utf-8');
         return true;
       }
     }

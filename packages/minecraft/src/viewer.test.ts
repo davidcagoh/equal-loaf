@@ -171,6 +171,68 @@ test('serves subtitles client and relays validated dialogue over same-origin SSE
   }
 });
 
+test('serves the opt-in native resident page and bundled assets without provider credentials', async () => {
+  const probe = createServer();
+  probe.listen(0);
+  await new Promise<void>((resolve) => probe.once('listening', resolve));
+  const address = probe.address();
+  assert.ok(address && typeof address !== 'string');
+  const port = address.port;
+  await new Promise<void>((resolve, reject) => probe.close((error) => error ? reject(error) : resolve()));
+
+  const originalApiKey = process.env.BOSON_API_KEY;
+  const originalEnvFile = process.env.BOSON_PTT_ENV_FILE;
+  const originalIpcSocket = process.env.BOSON_VILLAGE_IPC_SOCKET;
+  delete process.env.BOSON_API_KEY;
+  delete process.env.BOSON_PTT_ENV_FILE;
+  delete process.env.BOSON_VILLAGE_IPC_SOCKET;
+  let server: Server | undefined;
+  const stop = await startLoopbackViewer({}, port, (_bot, options) => {
+    server = createServer((_request, response) => response.end('viewer'));
+    server.listen(options.port, () => undefined);
+  });
+  try {
+    const sameSite = { 'sec-fetch-site': 'same-origin' };
+    const nativePage = await fetch(`http://127.0.0.1:${port}/?nativeResidentAudio=1`, { headers: sameSite });
+    assert.equal(nativePage.status, 200);
+    const nativeHtml = await nativePage.text();
+    assert.match(nativeHtml, /boson-ptt-native\.js/);
+    assert.match(nativeHtml, /boson-controls\.js/);
+    assert.doesNotMatch(nativeHtml, /boson-audio\.js|boson-ptt\.js/);
+
+    const normalPage = await fetch(`http://127.0.0.1:${port}/`, { headers: sameSite });
+    const normalHtml = await normalPage.text();
+    assert.match(normalHtml, /boson-audio\.js/);
+    assert.match(normalHtml, /boson-ptt\.js/);
+    assert.doesNotMatch(normalHtml, /boson-ptt-native\.js/);
+
+    for (const path of [
+      '/boson-ptt-native.js',
+      '/audio/native-realtime-core.js',
+      '/audio/native-resident-pcm-mixer.js',
+      '/audio/spatial-voice-mixer.js',
+      '/audio/native-response-playback.js',
+    ]) {
+      const asset = await fetch(`http://127.0.0.1:${port}${path}`, { headers: sameSite });
+      assert.equal(asset.status, 200, path);
+      assert.match(asset.headers.get('content-type') ?? '', /javascript/);
+      assert.ok((await asset.text()).length > 0, path);
+    }
+
+    const status = await fetch(`http://127.0.0.1:${port}/boson-ptt/status`, { headers: sameSite });
+    assert.equal(status.status, 200);
+    assert.equal((await status.json()).available, false);
+  } finally {
+    await stop();
+    if (originalApiKey === undefined) delete process.env.BOSON_API_KEY;
+    else process.env.BOSON_API_KEY = originalApiKey;
+    if (originalEnvFile === undefined) delete process.env.BOSON_PTT_ENV_FILE;
+    else process.env.BOSON_PTT_ENV_FILE = originalEnvFile;
+    if (originalIpcSocket === undefined) delete process.env.BOSON_VILLAGE_IPC_SOCKET;
+    else process.env.BOSON_VILLAGE_IPC_SOCKET = originalIpcSocket;
+  }
+});
+
 test('binds the Prismarine HTTP viewer to loopback only', async () => {
   const probe = createServer();
   probe.listen(0);
