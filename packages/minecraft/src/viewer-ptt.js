@@ -37,6 +37,12 @@ export function isBoundedPttResponse(value, allowedLineIds) {
     && typeof value.lineId === 'string' && allowedLineIds.includes(value.lineId);
 }
 
+export function isBoundedPttLineIdList(value) {
+  return Array.isArray(value) && value.length > 0 && value.length <= 32
+    && value.every((id) => typeof id === 'string' && /^[A-Za-z0-9:._-]{1,128}$/.test(id))
+    && new Set(value).size === value.length;
+}
+
 export function evaluateCompletedPttResponse(event, accumulatedText, terminalText, allowedLineIds, terminalPartCount = Number(typeof terminalText === 'string')) {
   if (!event || typeof event !== 'object' || event.type !== 'response.done'
     || !event.response || typeof event.response !== 'object' || event.response.status !== 'completed') {
@@ -277,9 +283,7 @@ export function startViewerPtt() {
   }
 
   function validLineIds(value) {
-    return Array.isArray(value) && value.length > 0 && value.length <= 32
-      && value.every((id) => typeof id === 'string' && /^[A-Za-z0-9:_-]{1,128}$/.test(id))
-      && new Set(value).size === value.length;
+    return isBoundedPttLineIdList(value);
   }
 
   function handleProviderMessage(active, raw) {

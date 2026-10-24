@@ -3,12 +3,23 @@ import test from 'node:test';
 import {
   appendBoundedPttText,
   evaluateCompletedPttResponse,
+  isBoundedPttLineIdList,
   parseCompletedPttResponse,
   recordSingleTerminalPttText,
 } from './viewer-ptt.js';
 
 const allowedLineIds = ['mira-greeting'];
 const boundedResponse = JSON.stringify({ playerIntent: 'greet', topic: 'general', lineId: 'mira-greeting' });
+
+test('line ID allowlist accepts bounded scene dots and rejects malformed, duplicate, or oversized IDs', () => {
+  assert.equal(isBoundedPttLineIdList(['equal-loaf.thomas.welcome', 'equal-loaf.anna.garden-workers']), true);
+  assert.equal(isBoundedPttLineIdList(['x'.repeat(128)]), true);
+  assert.equal(isBoundedPttLineIdList(['x'.repeat(129)]), false);
+  assert.equal(isBoundedPttLineIdList(['line/id']), false);
+  assert.equal(isBoundedPttLineIdList(['duplicate', 'duplicate']), false);
+  assert.equal(isBoundedPttLineIdList([]), false);
+  assert.equal(isBoundedPttLineIdList(Array(33).fill('line')), false);
+});
 
 test('oversized provider deltas are rejected before being retained and remain rejected', () => {
   const asciiOverflow = appendBoundedPttText('', 'x'.repeat(2_001));
