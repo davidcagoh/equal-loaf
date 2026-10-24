@@ -18,11 +18,16 @@ const LOOK_INTERVAL_MS = 50;
 export function startViewerInput() {
   if (typeof document === 'undefined' || typeof window === 'undefined' || !window.io) return;
   const canvas = document.querySelector('canvas');
-  const status = document.createElement('div');
-  status.className = 'camera-help';
-  status.textContent = 'Click the world to play · WASD move · mouse look · Esc releases controls';
-  document.body.append(status);
+  let status = document.querySelector('.camera-help');
+  if (!status) {
+    status = document.createElement('div');
+    status.className = 'camera-help';
+    status.setAttribute('role', 'status');
+    document.body.append(status);
+  }
+  status.textContent = 'Connecting to viewer…';
   if (!canvas) return;
+  canvas.tabIndex = 0;
 
   const socket = window.io();
   const buttons = Object.fromEntries(BUTTON_NAMES.map((name) => [name, false]));
@@ -31,6 +36,26 @@ export function startViewerInput() {
   let pitch = 0;
   let poseReady = false;
   let pointerLocked = false;
+  let pointerLockPending = false;
+
+  function hasViewerFocus() {
+    return document.pointerLockElement === canvas
+      || document.activeElement === canvas;
+  }
+
+  function updateStatus() {
+    if (!socket.connected) {
+      status.textContent = 'Viewer disconnected · reconnecting…';
+    } else if (!poseReady) {
+      status.textContent = 'Connected · waiting for player position…';
+    } else if (pointerLocked) {
+      status.textContent = 'WASD move · mouse look · Esc releases controls';
+    } else if (document.activeElement === canvas) {
+      status.textContent = 'WASD move · click for mouse look · Esc releases controls';
+    } else {
+      status.textContent = 'Click the world to play · WASD move · mouse look · Esc releases controls';
+    }
+  }
 
   socket.on('position', (packet) => {
     if (!packet?.pos || !Number.isFinite(packet.yaw) || !Number.isFinite(packet.pitch)) return;
@@ -40,10 +65,11 @@ export function startViewerInput() {
       window.bosonLookPose = { yaw, pitch };
     }
     poseReady = true;
+    updateStatus();
   });
 
   function sendControls() {
-    if (!pointerLocked || !socket.connected || !poseReady) return;
+    if (!hasViewerFocus() || !socket.connected || !poseReady) return;
     socket.emit('boson:controls', {
       type: 'explorer.control',
       seq: seq++,
@@ -60,14 +86,29 @@ export function startViewerInput() {
   }
 
   function requestPointerLock() {
-    if (!document.pointerLockElement) void canvas.requestPointerLock?.();
+    canvas.focus?.();
+    updateStatus();
+    if (!document.pointerLockElement && !pointerLockPending) {
+      try {
+        const lockRequest = canvas.requestPointerLock?.();
+        if (lockRequest && typeof lockRequest.then === 'function') {
+          pointerLockPending = true;
+          void lockRequest.catch(() => undefined).finally(() => {
+            pointerLockPending = false;
+            updateStatus();
+          });
+        }
+      } catch {
+        updateStatus();
+      }
+    }
   }
 
   canvas.addEventListener('click', requestPointerLock);
   canvas.addEventListener('pointerdown', requestPointerLock);
   document.addEventListener('keydown', (event) => {
     const control = BUTTON_KEYS[event.code];
-    if (!control || !document.pointerLockElement) return;
+    if (!control || !hasViewerFocus()) return;
     event.preventDefault();
     buttons[control] = true;
   });
@@ -75,7 +116,7 @@ export function startViewerInput() {
     const control = BUTTON_KEYS[event.code];
     if (!control) return;
     buttons[control] = false;
-    if (document.pointerLockElement) event.preventDefault();
+    if (hasViewerFocus()) event.preventDefault();
   });
   document.addEventListener('mousemove', (event) => {
     if (!document.pointerLockElement || !poseReady) return;
@@ -85,19 +126,29 @@ export function startViewerInput() {
   });
   document.addEventListener('pointerlockchange', () => {
     pointerLocked = document.pointerLockElement === canvas;
-    status.textContent = document.pointerLockElement
-      ? 'WASD move · mouse look · Esc releases controls'
-      : 'Click the world to play · WASD move · mouse look · Esc releases controls';
+    updateStatus();
     if (pointerLocked) sendControls();
     else releaseControls();
+  });
+  canvas.addEventListener('focus', updateStatus);
+  canvas.addEventListener('blur', () => {
+    updateStatus();
+    if (!pointerLocked) releaseControls();
   });
   window.addEventListener('blur', releaseControls);
   document.addEventListener('visibilitychange', () => {
     if (document.visibilityState !== 'visible') releaseControls();
   });
   window.addEventListener('pagehide', releaseControls);
-  socket.on('disconnect', releaseControls);
-  socket.on('connect', () => { seq = 0; });
+  socket.on('disconnect', () => {
+    releaseControls();
+    updateStatus();
+  });
+  socket.on('connect', () => {
+    seq = 0;
+    updateStatus();
+  });
+  updateStatus();
   window.setInterval(sendControls, LOOK_INTERVAL_MS);
 }
 
