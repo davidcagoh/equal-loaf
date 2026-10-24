@@ -2,7 +2,7 @@ const fs = require('node:fs')
 const path = require('node:path')
 const crypto = require('node:crypto')
 const { spawnSync } = require('node:child_process')
-const { normalizeIndexSource, normalizeVillagerTextureSource, normalizeEntityNameplateSource } = require('./prismarine-viewer-patch.cjs')
+const { normalizeIndexSource, normalizeVillagerTextureSource, normalizeEntityNameplateSource, normalizeCameraHelpSource } = require('./prismarine-viewer-patch.cjs')
 
 const viewerRoot = path.join(__dirname, '..', 'node_modules', 'prismarine-viewer')
 const webpackPath = process.env.BOSON_WEBPACK_BIN || path.join(__dirname, '..', 'node_modules', '.bin', 'webpack')
@@ -17,7 +17,7 @@ if (viewerPackage.version !== '1.33.0') {
   throw new Error(`Expected prismarine-viewer@1.33.0, found ${viewerPackage.version}`)
 }
 
-const PATCH_REVISION = 'boson-first-person-controls-complete-resident-nameplates-v7'
+const PATCH_REVISION = 'boson-first-person-controls-complete-resident-nameplates-v8'
 const markerPath = path.join(viewerRoot, '.boson-patch-state.json')
 const patchHash = crypto.createHash('sha256')
   .update(PATCH_REVISION)
@@ -416,14 +416,12 @@ replaceExpected(
       }`,
   '      const packet = { pos: bot.entity.position, yaw: bot.entity.yaw, pitch: bot.entity.pitch, eyeHeight: bot.entity.eyeHeight, addMesh: true }'
 )
-replaceAnyExpected(
-  'public/index.html',
-  [
-    '  <body>\n    <div class="camera-help" role="status">Drag to look · scroll to zoom · right-drag to pan</div>\n',
-    '  <body>\n    <div class="camera-help" role="status">Third-person view follows the explorer’s look direction</div>\n'
-  ],
-  '  <body>\n    <div class="camera-help" role="status">Click the world to play · WASD move · mouse look · Esc releases controls</div>\n'
-)
+{
+  const filePath = path.join(viewerRoot, 'public', 'index.html')
+  const source = fs.readFileSync(filePath, 'utf8')
+  const updated = normalizeCameraHelpSource(source)
+  if (updated !== source) fs.writeFileSync(filePath, updated)
+}
 
 fs.copyFileSync(path.join(__dirname, 'follow-camera.cjs'), path.join(viewerRoot, 'lib', 'boson-follow-camera.js'))
 const build = spawnSync(webpackPath, ['--config', 'webpack.config.js'], { cwd: viewerRoot, stdio: 'inherit' })

@@ -150,4 +150,21 @@ function normalizeEntityNameplateSource(source) {
   return source.slice(0, start) + replacement + source.slice(endOffset)
 }
 
-module.exports = { normalizeIndexSource, normalizeVillagerTextureSource, normalizeEntityNameplateSource }
+function normalizeCameraHelpSource(source) {
+  const after = '  <body>\n    <div class="camera-help" role="status">Click the world to play · WASD move · mouse look · Esc releases controls</div>\n'
+  if (source.includes(after)) return source
+
+  const legacySections = [
+    '  <body>\n    <div class="camera-help" role="status">Drag to look · scroll to zoom · right-drag to pan</div>\n',
+    '  <body>\n    <div class="camera-help" role="status">Third-person view follows the explorer’s look direction</div>\n'
+  ]
+  for (const before of legacySections) {
+    if (source.includes(before)) return source.replace(before, after)
+  }
+
+  const bodyStart = '  <body>\n'
+  if (source.includes(bodyStart)) return source.replace(bodyStart, after)
+  throw new Error('Could not find expected Prismarine Viewer document body')
+}
+
+module.exports = { normalizeIndexSource, normalizeVillagerTextureSource, normalizeEntityNameplateSource, normalizeCameraHelpSource }

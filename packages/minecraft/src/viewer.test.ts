@@ -12,6 +12,9 @@ import { startLoopbackViewer } from './viewer.ts';
 import { isVillageDialogue, volumeForDistance } from './viewer-audio.js';
 
 const require = createRequire(import.meta.url);
+const { normalizeCameraHelpSource } = require('../scripts/prismarine-viewer-patch.cjs') as {
+  normalizeCameraHelpSource(source: string): string;
+};
 const followCamera = require('../scripts/follow-camera.cjs') as {
   viewDirection(yaw: number, pitch: number): { x: number; y: number; z: number };
   cameraPosition(position: { x: number; y: number; z: number }, yaw: number, pitch: number, eyeHeight: number, distance: number): { x: number; y: number; z: number };
@@ -118,6 +121,20 @@ test('maps greater explorer distance to lower speech volume and validates dialog
     position: { x: 1, y: 2, z: 3 }, timestamp: 10,
   }), true);
   assert.equal(isVillageDialogue({ type: 'village.dialogue', line: 'bad' }), false);
+});
+
+test('normalizes camera help for clean upstream HTML without removing its script', () => {
+  const cleanUpstream = '<html>\n  <body>\n    <script type="text/javascript" src="index.js"></script>\n  </body>\n</html>\n';
+  const normalized = normalizeCameraHelpSource(cleanUpstream);
+  assert.match(normalized, /Click the world to play · WASD move · mouse look · Esc releases controls/);
+  assert.match(normalized, /<script type="text\/javascript" src="index\.js"><\/script>/);
+  assert.equal(normalizeCameraHelpSource(normalized), normalized);
+
+  const legacy = '<html>\n  <body>\n    <div class="camera-help" role="status">Drag to look · scroll to zoom · right-drag to pan</div>\n    <script src="index.js"></script>\n  </body>\n</html>\n';
+  const patchedLegacy = normalizeCameraHelpSource(legacy);
+  assert.match(patchedLegacy, /Click the world to play · WASD move · mouse look · Esc releases controls/);
+  assert.match(patchedLegacy, /<script src="index\.js"><\/script>/);
+  assert.equal(normalizeCameraHelpSource(patchedLegacy), patchedLegacy);
 });
 
 test('serves subtitles client and relays validated dialogue over same-origin SSE', async () => {
