@@ -160,11 +160,11 @@ export class ResidentNativeReactionPolicy {
     return { status: 'queued', ...(displacedEventId ? { displacedEventId } : {}) };
   }
 
-  takeNextAny(now = Date.now()): ScheduledNativeReaction | null {
+  takeNextAny(now = Date.now(), blockedResidentIds: ReadonlySet<string> = new Set()): ScheduledNativeReaction | null {
     this.prune(now);
     if (this.activeCount >= this.#maxActive) return null;
     const choices = [...this.#states.entries()]
-      .filter(([, state]) => !state.active && state.pending.length > 0
+      .filter(([residentId, state]) => !blockedResidentIds.has(residentId) && !state.active && state.pending.length > 0
         && (state.lastCompletedAt === undefined || now - state.lastCompletedAt >= this.#cooldownMs))
       .map(([residentId, state]) => ({ residentId, state, next: [...state.pending].sort(compareReactions)[0]! }))
       .sort((left, right) => compareReactions(left.next, right.next) || left.residentId.localeCompare(right.residentId));
