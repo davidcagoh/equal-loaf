@@ -1,0 +1,435 @@
+import { PLAYER_INTENTS, VILLAGE_TOPICS } from './village-vocabulary.js';
+
+const MAX_HOLD_MS = 30_000;
+const MAX_TOTAL_INPUT_MS = 300_000;
+const TARGET_SAMPLE_RATE = 24_000;
+const AUDIO_CHUNK_SAMPLES = 960;
+const REALTIME_URL = 'wss://api.boson.ai/v1/realtime';
+
+export function isBoundedPttResponse(value, allowedLineIds) {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return false;
+  const keys = Object.keys(value).sort().join(',');
+  return keys === 'lineId,playerIntent,topic'
+    && typeof value.playerIntent === 'string'
+    && PLAYER_INTENTS.includes(value.playerIntent)
+    && typeof value.topic === 'string' && VILLAGE_TOPICS.includes(value.topic)
+    && /^[A-Za-z0-9 _-]+$/.test(value.topic)
+    && typeof value.lineId === 'string' && allowedLineIds.includes(value.lineId);
+}
+
+export function startViewerPtt() {
+  if (typeof document === 'undefined' || typeof window === 'undefined') return;
+  const style = document.createElement('style');
+  style.textContent = `
+    #boson-ptt { position: fixed; z-index: 6; left: 16px; top: 16px; width: min(320px, calc(100vw - 32px));
+      box-sizing: border-box; padding: 12px; color: #f8fafc; background: rgba(15,23,42,.94);
+      border: 1px solid rgba(148,163,184,.45); border-radius: 10px; font: 14px/1.4 system-ui,sans-serif; }
+    #boson-ptt strong { display:block; margin-bottom: 6px; }
+    #boson-ptt button { min-height: 42px; padding: 8px 14px; color: #f8fafc; background:#7c2d12;
+      border:1px solid #fdba74; border-radius:6px; font:600 15px/1.2 system-ui,sans-serif; cursor:pointer; touch-action:none; }
+    #boson-ptt button:focus-visible { outline: 3px solid #fbbf24; outline-offset: 2px; }
+    #boson-ptt button:disabled { cursor:not-allowed; opacity:.65; }
+    #boson-ptt-status { display:block; margin-top:8px; color:#cbd5e1; }
+  `;
+  document.head.append(style);
+  const panel = document.createElement('section');
+  panel.id = 'boson-ptt';
+  panel.setAttribute('aria-label', 'Push-to-talk village conversation');
+  const title = document.createElement('strong');
+  title.textContent = 'Talk to a nearby villager';
+  const button = document.createElement('button');
+  button.type = 'button';
+  button.textContent = 'Hold to talk';
+  button.setAttribute('aria-label', 'Hold to talk to the nearest villager');
+  button.setAttribute('aria-pressed', 'false');
+  const status = document.createElement('span');
+  status.id = 'boson-ptt-status';
+  status.setAttribute('role', 'status');
+  status.setAttribute('aria-live', 'polite');
+  status.textContent = 'Checking local voice availability…';
+  panel.append(title, button, status);
+  document.body.append(panel);
+
+  let available = false;
+  let held = false;
+  let currentTurn = null;
+  let holdTimer = null;
+  let turnsUsed = 0;
+  let totalInputMs = 0;
+  let generation = 0;
+
+  const stopTracks = (stream) => {
+    for (const track of stream?.getTracks?.() ?? []) track.stop();
+  };
+  const setStatus = (message) => { status.textContent = message; };
+  const closeSocket = (socket) => {
+    if (socket && socket.readyState < WebSocket.CLOSING) socket.close(1000, 'Push-to-talk turn ended');
+  };
+
+  async function post(path, payload) {
+    return fetch(path, {
+      method: 'POST',
+      credentials: 'same-origin',
+      cache: 'no-store',
+      redirect: 'error',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(payload),
+    });
+  }
+
+  async function cancelTurn(active) {
+    if (!active?.turnId || active.cancelSent) return;
+    active.cancelSent = true;
+    try { await post('/boson-ptt/cancel', { turnId: active.turnId }); } catch { /* turn expiry is the server fallback */ }
+  }
+
+  function clearAudio(active) {
+    active.worklet?.port && (active.worklet.port.onmessage = null);
+    for (const node of [active.source, active.worklet, active.silence]) {
+      try { node?.disconnect(); } catch { /* already disconnected */ }
+    }
+    stopTracks(active.stream);
+    if (active.audioContext && active.audioContext.state !== 'closed') void active.audioContext.close().catch(() => undefined);
+    active.pendingSamples = [];
+  }
+
+  function sendPcmChunk(active, samples) {
+    if (active.phase !== 'capturing' || !held || active.socket?.readyState !== WebSocket.OPEN || samples.length === 0) return false;
+    const pcm = new Uint8Array(samples.length * 2);
+    const view = new DataView(pcm.buffer);
+    for (let index = 0; index < samples.length; index += 1) {
+      const sample = Math.max(-1, Math.min(1, samples[index]));
+      view.setInt16(index * 2, sample < 0 ? sample * 0x8000 : sample * 0x7fff, true);
+    }
+    let binary = '';
+    for (const byte of pcm) binary += String.fromCharCode(byte);
+    active.socket.send(JSON.stringify({ type: 'input_audio_buffer.append', audio: btoa(binary) }));
+    active.samplesSent += samples.length;
+    totalInputMs += (samples.length / TARGET_SAMPLE_RATE) * 1_000;
+    return true;
+  }
+
+  function startAudioCapture(active) {
+    if (currentTurn !== active || !held || active.releaseRequested) {
+      clearAudio(active);
+      void cancelTurn(active);
+      return;
+    }
+    try {
+      active.audioContext = new AudioContext({ sampleRate: TARGET_SAMPLE_RATE });
+      active.source = active.audioContext.createMediaStreamSource(active.stream);
+      active.workletPromise = active.audioContext.audioWorklet.addModule('/boson-ptt-worklet.js');
+      void active.workletPromise.then(() => {
+        if (currentTurn !== active || !held || active.releaseRequested || active.socket?.readyState !== WebSocket.OPEN) {
+          clearAudio(active);
+          void cancelTurn(active);
+          return;
+        }
+        active.worklet = new AudioWorkletNode(active.audioContext, 'boson-ptt-capture', {
+          numberOfInputs: 1,
+          numberOfOutputs: 1,
+          outputChannelCount: [1],
+          processorOptions: { targetSampleRate: TARGET_SAMPLE_RATE },
+        });
+        active.silence = active.audioContext.createGain();
+        active.silence.gain.value = 0;
+        active.pendingSamples = [];
+        active.worklet.port.onmessage = (event) => {
+          if (currentTurn !== active || active.phase !== 'capturing' || !held || !(event.data instanceof Float32Array)) return;
+          for (const sample of event.data) active.pendingSamples.push(sample);
+          while (active.pendingSamples.length >= AUDIO_CHUNK_SAMPLES) {
+            const chunk = active.pendingSamples.splice(0, AUDIO_CHUNK_SAMPLES);
+            if (!sendPcmChunk(active, chunk)) break;
+            if (totalInputMs >= MAX_TOTAL_INPUT_MS) {
+              finishHold(true);
+              break;
+            }
+          }
+        };
+        active.source.connect(active.worklet);
+        active.worklet.connect(active.silence);
+        active.silence.connect(active.audioContext.destination);
+        active.phase = 'capturing';
+        setStatus('Listening only while held. Release to send this turn.');
+      }).catch(() => failTurn(active, 'Local audio capture is unavailable; village voices remain available.'));
+    } catch {
+      failTurn(active, 'Local audio capture is unavailable; village voices remain available.');
+    }
+  }
+
+  async function completeTurn(active, modelResponse) {
+    if (active.completionSent || !active.turnId) return;
+    active.completionSent = true;
+    try {
+      const response = await post('/boson-ptt/complete', { turnId: active.turnId, response: modelResponse });
+      const result = await response.json().catch(() => ({}));
+      setStatus(response.ok && result.accepted ? 'Nearby villagers heard the turn.'
+        : 'The turn ended; local village dialogue remains available.');
+    } catch {
+      setStatus('The turn ended; local village dialogue remains available.');
+    }
+    closeSocket(active.socket);
+    clearAudio(active);
+    if (currentTurn === active) currentTurn = null;
+  }
+
+  async function failTurn(active, message) {
+    if (currentTurn !== active) return;
+    clearAudio(active);
+    closeSocket(active.socket);
+    if (active.samplesSent > 0 && active.turnId) await completeTurn(active, null);
+    else await cancelTurn(active);
+    if (currentTurn === active) currentTurn = null;
+    setStatus(message);
+  }
+
+  function parseModelOutput(text, allowedLineIds) {
+    if (!text || new TextEncoder().encode(text).byteLength > 2_000) return null;
+    try {
+      const value = JSON.parse(text);
+      return isBoundedPttResponse(value, allowedLineIds) ? value : null;
+    } catch {
+      return null;
+    }
+  }
+
+  function validLineIds(value) {
+    return Array.isArray(value) && value.length > 0 && value.length <= 32
+      && value.every((id) => typeof id === 'string' && /^[A-Za-z0-9:_-]{1,128}$/.test(id))
+      && new Set(value).size === value.length;
+  }
+
+  function handleProviderMessage(active, raw) {
+    let event;
+    try { event = JSON.parse(raw); } catch { return; }
+    if (!event || typeof event !== 'object' || typeof event.type !== 'string') return;
+    if (event.type === 'session.created') {
+      active.sessionReady = true;
+      startAudioCapture(active);
+      return;
+    }
+    if (event.type === 'input_audio_buffer.committed') {
+      active.socket.send(JSON.stringify({ type: 'response.create', response: { max_output_tokens: 160 } }));
+      return;
+    }
+    if (event.type === 'response.output_text.delta') {
+      if (typeof event.delta !== 'string') return;
+      active.responseText += event.delta;
+      if (new TextEncoder().encode(active.responseText).byteLength > 2_000) {
+        active.socket.send(JSON.stringify({ type: 'response.cancel' }));
+        void completeTurn(active, null);
+      }
+      return;
+    }
+    if (event.type === 'response.done') {
+      const result = parseModelOutput(active.responseText, active.allowedLineIds);
+      void completeTurn(active, result);
+      return;
+    }
+    if (event.type === 'error') {
+      void failTurn(active, 'Boson voice could not finish; local village dialogue remains available.');
+    }
+  }
+
+  async function connectProvider(active, setup) {
+    if (!held || active.releaseRequested || currentTurn !== active) {
+      await cancelTurn(active);
+      stopTracks(active.stream);
+      if (currentTurn === active) currentTurn = null;
+      return;
+    }
+    active.turnId = setup.turnId;
+    active.allowedLineIds = setup.allowedLineIds;
+    active.socket = new WebSocket(REALTIME_URL, ['realtime', `bai-client-secret.${setup.clientSecret}`]);
+    active.phase = 'websocket';
+    active.socket.addEventListener('open', () => {
+      if (currentTurn !== active || !held || active.releaseRequested) {
+        void cancelTurn(active);
+        closeSocket(active.socket);
+        clearAudio(active);
+        if (currentTurn === active) currentTurn = null;
+        return;
+      }
+      active.socket.send(JSON.stringify({
+        type: 'session.update',
+        session: {
+          model: 'higgs-realtime',
+          instructions: setup.instructions,
+          output_modalities: ['text'],
+          audio: { input: {
+            format: { type: 'audio/pcm', rate: TARGET_SAMPLE_RATE },
+            noise_reduction: { type: 'near_field' },
+            turn_detection: null,
+          } },
+          tools: [],
+          tool_choice: 'none',
+          temperature: 0.2,
+          max_output_tokens: 160,
+          truncation: 'disabled',
+        },
+      }));
+      active.secret = '';
+    });
+    active.socket.addEventListener('message', (event) => {
+      if (typeof event.data === 'string' && currentTurn === active) handleProviderMessage(active, event.data);
+    });
+    active.socket.addEventListener('error', () => {
+      void failTurn(active, 'Boson voice could not connect; local village dialogue remains available.');
+    });
+    active.socket.addEventListener('close', () => {
+      if (currentTurn === active && active.phase !== 'waiting-response' && !active.completionSent) {
+        void failTurn(active, 'Boson voice disconnected; local village dialogue remains available.');
+      }
+    });
+  }
+
+  async function beginHold() {
+    if (!available || held || currentTurn || turnsUsed >= 10 || totalInputMs >= MAX_TOTAL_INPUT_MS) return;
+    held = true;
+    turnsUsed += 1;
+    const active = {
+      generation: ++generation,
+      phase: 'permission',
+      releaseRequested: false,
+      stream: null,
+      audioContext: null,
+      source: null,
+      worklet: null,
+      silence: null,
+      socket: null,
+      turnId: null,
+      secret: '',
+      allowedLineIds: [],
+      pendingSamples: [],
+      samplesSent: 0,
+      responseText: '',
+      completionSent: false,
+      cancelSent: false,
+    };
+    currentTurn = active;
+    button.setAttribute('aria-pressed', 'true');
+    button.textContent = 'Release to send';
+    setStatus('Requesting microphone access for this held turn…');
+    holdTimer = window.setTimeout(() => finishHold(true), MAX_HOLD_MS);
+    try {
+      if (!navigator.mediaDevices?.getUserMedia) throw new Error('Microphone access is unavailable in this browser.');
+      const stream = await navigator.mediaDevices.getUserMedia({ audio: { echoCancellation: true, noiseSuppression: true, channelCount: 1 } });
+      active.stream = stream;
+      if (!held || currentTurn !== active || active.releaseRequested) {
+        stopTracks(stream);
+        if (currentTurn === active) currentTurn = null;
+        return;
+      }
+      active.phase = 'awaiting-begin';
+      setStatus('Connecting to the nearest villager…');
+      const response = await fetch('/boson-ptt/begin', { method: 'POST', credentials: 'same-origin', cache: 'no-store', redirect: 'error' });
+      const setup = await response.json().catch(() => ({}));
+      if (typeof setup.turnId === 'string') active.turnId = setup.turnId;
+      if (!response.ok || !setup.available || typeof setup.turnId !== 'string'
+        || typeof setup.clientSecret !== 'string' || typeof setup.instructions !== 'string'
+        || !validLineIds(setup.allowedLineIds)) {
+        stopTracks(stream);
+        if (active.turnId) await cancelTurn(active);
+        setStatus(typeof setup.error === 'string' ? setup.error : 'Push-to-talk is unavailable; local village audio remains available.');
+        if (currentTurn === active) currentTurn = null;
+        return;
+      }
+      if (!held || currentTurn !== active || active.releaseRequested) {
+        active.turnId = setup.turnId;
+        stopTracks(stream);
+        await cancelTurn(active);
+        if (currentTurn === active) currentTurn = null;
+        return;
+      }
+      void connectProvider(active, setup);
+    } catch (error) {
+      stopTracks(active.stream);
+      if (currentTurn === active) currentTurn = null;
+      setStatus(error instanceof Error && error.message.includes('Microphone')
+        ? error.message : 'Push-to-talk could not start; local village audio remains available.');
+    }
+  }
+
+  async function finishHold(limitReached = false) {
+    if (!held) return;
+    held = false;
+    if (holdTimer) window.clearTimeout(holdTimer);
+    holdTimer = null;
+    button.setAttribute('aria-pressed', 'false');
+    button.textContent = 'Hold to talk';
+    const active = currentTurn;
+    if (!active) return;
+    if (active.phase === 'permission') {
+      active.releaseRequested = true;
+      currentTurn = null;
+      setStatus('Microphone request cancelled; local village audio remains available.');
+      return;
+    }
+    if (active.phase === 'awaiting-begin' || active.phase === 'websocket') {
+      active.releaseRequested = true;
+      clearAudio(active);
+      if (active.turnId) await cancelTurn(active);
+      setStatus('Turn cancelled before audio started.');
+      return;
+    }
+    if (active.phase !== 'capturing') return;
+    active.phase = 'waiting-response';
+    clearAudio(active);
+    if (active.samplesSent === 0 || active.socket?.readyState !== WebSocket.OPEN) {
+      await cancelTurn(active);
+      closeSocket(active.socket);
+      currentTurn = null;
+      setStatus('No speech was sent; local village dialogue remains available.');
+      return;
+    }
+    active.socket.send(JSON.stringify({ type: 'input_audio_buffer.commit' }));
+    setStatus(limitReached ? 'Hold limit reached; finishing the turn…' : 'Finishing the held turn…');
+  }
+
+  function onPointerDown(event) {
+    if (button.disabled || held) return;
+    event.preventDefault();
+    try { button.setPointerCapture(event.pointerId); } catch { /* optional browser support */ }
+    void beginHold();
+  }
+  function onPointerEnd(event) {
+    if (!held) return;
+    event?.preventDefault?.();
+    void finishHold(false);
+  }
+
+  button.addEventListener('pointerdown', onPointerDown);
+  button.addEventListener('pointerup', onPointerEnd);
+  button.addEventListener('pointercancel', onPointerEnd);
+  button.addEventListener('lostpointercapture', onPointerEnd);
+  button.addEventListener('keydown', (event) => {
+    if (!['Space', 'Enter'].includes(event.code) || event.repeat || button.disabled || held) return;
+    event.preventDefault();
+    void beginHold();
+  });
+  button.addEventListener('keyup', (event) => {
+    if (!['Space', 'Enter'].includes(event.code)) return;
+    event.preventDefault();
+    void finishHold(false);
+  });
+  window.addEventListener('blur', () => { void finishHold(false); });
+  window.addEventListener('pagehide', () => { void finishHold(false); });
+  document.addEventListener('visibilitychange', () => {
+    if (document.visibilityState !== 'visible') void finishHold(false);
+  });
+
+  void fetch('/boson-ptt/status', { credentials: 'same-origin', cache: 'no-store' })
+    .then(async (response) => response.json())
+    .then((result) => {
+      available = Boolean(result.available);
+      button.disabled = !available;
+      setStatus(typeof result.message === 'string' ? result.message : available
+        ? 'Hold to talk to the nearest villager.' : 'Push-to-talk is unavailable; local village audio remains available.');
+    })
+    .catch(() => {
+      button.disabled = true;
+      setStatus('Push-to-talk status is unavailable; local village audio remains available.');
+    });
+}
+
+if (typeof document !== 'undefined') startViewerPtt();

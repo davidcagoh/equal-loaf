@@ -10,7 +10,8 @@
     "test": "node --experimental-strip-types --test src/*.test.ts",
     "start": "node --experimental-strip-types ../../packages/voice/src/server.ts",
     "demo-player": "node --experimental-strip-types src/demo-player.ts",
-    "village": "node --experimental-strip-types src/village.ts"
+    "village": "node --experimental-strip-types src/village.ts",
+    "pre-demo-player": "node scripts/apply-prismarine-viewer-fix.cjs"
   },
   "dependencies": {
     "canvas": "3.2.0",

@@ -1,12 +1,14 @@
 const fs = require('node:fs')
 const path = require('node:path')
+const crypto = require('node:crypto')
 const { spawnSync } = require('node:child_process')
+const { normalizeIndexSource } = require('./prismarine-viewer-patch.cjs')
 
 const viewerRoot = path.join(__dirname, '..', 'node_modules', 'prismarine-viewer')
 const webpackPath = process.env.BOSON_WEBPACK_BIN || path.join(__dirname, '..', 'node_modules', '.bin', 'webpack')
 if (!fs.existsSync(webpackPath)) {
-  console.warn('Skipping Prismarine Viewer patch: webpack is unavailable. Install packages/minecraft devDependencies to build the Boson viewer bundle.')
-  process.exit(0)
+  console.error('Cannot verify or build the Boson viewer patch: webpack is unavailable. Install packages/minecraft devDependencies before launching the demo.')
+  process.exit(1)
 }
 
 const viewerPackage = require(path.join(viewerRoot, 'package.json'))
@@ -14,6 +16,43 @@ const viewerPackage = require(path.join(viewerRoot, 'package.json'))
 if (viewerPackage.version !== '1.33.0') {
   throw new Error(`Expected prismarine-viewer@1.33.0, found ${viewerPackage.version}`)
 }
+
+const PATCH_REVISION = 'boson-first-person-controls-v3'
+const markerPath = path.join(viewerRoot, '.boson-patch-state.json')
+const patchHash = crypto.createHash('sha256')
+  .update(PATCH_REVISION)
+  .update(fs.readFileSync(__filename))
+  .update(fs.readFileSync(path.join(__dirname, 'prismarine-viewer-patch.cjs')))
+  .update(fs.readFileSync(path.join(__dirname, 'follow-camera.cjs')))
+  .digest('hex')
+const patchAssetsComplete = () => {
+  try {
+    const viewerSource = fs.readFileSync(path.join(viewerRoot, 'lib', 'index.js'), 'utf8')
+    const mineflayerSource = fs.readFileSync(path.join(viewerRoot, 'lib', 'mineflayer.js'), 'utf8')
+    const page = fs.readFileSync(path.join(viewerRoot, 'public', 'index.html'), 'utf8')
+    const bundle = fs.readFileSync(path.join(viewerRoot, 'public', 'index.js'), 'utf8')
+    const worker = fs.readFileSync(path.join(viewerRoot, 'public', 'worker.js'), 'utf8')
+    return viewerSource.includes('const safeDistance = FIRST_PERSON_DISTANCE')
+      && viewerSource.includes('localLookPose')
+      && !viewerSource.includes('const currentCameraDistance = 3.5')
+      && mineflayerSource.includes("socket.on('boson:controls'")
+      && mineflayerSource.includes("socket.on('boson:control-release'")
+      && page.includes('Click the world to play · WASD move · mouse look')
+      && bundle.includes('bosonLookPose')
+      && !/if\([\w$]+\.position\.y<0\)continue;?/.test(worker)
+  } catch {
+    return false
+  }
+}
+const patchIsCurrent = () => {
+  try {
+    const marker = JSON.parse(fs.readFileSync(markerPath, 'utf8'))
+    return marker.revision === PATCH_REVISION && marker.hash === patchHash && patchAssetsComplete()
+  } catch {
+    return false
+  }
+}
+if (patchIsCurrent()) process.exit(0)
 
 function replaceExpected (relativePath, before, after, expectedCount = 1) {
   const filePath = path.join(viewerRoot, relativePath)
@@ -50,6 +89,13 @@ function replaceSection (relativePath, startMarker, endMarker, replacement, comp
   const end = source.indexOf(endMarker, start)
   if (start < 0 || end < 0) throw new Error(`Could not find expected Prismarine Viewer section in ${relativePath}`)
   fs.writeFileSync(filePath, source.slice(0, start) + replacement + source.slice(end))
+}
+
+{
+  const filePath = path.join(viewerRoot, 'lib', 'index.js')
+  const source = fs.readFileSync(filePath, 'utf8')
+  const normalized = normalizeIndexSource(source)
+  if (normalized !== source) fs.writeFileSync(filePath, normalized)
 }
 
 replaceExpected(
@@ -123,6 +169,11 @@ replaceExpected(
   "    bot.on('move', botPosition)\n    botPosition()\n    worldView.listenToBot(bot)"
 )
 replaceExpected(
+  'lib/mineflayer.js',
+  "    socket.on('disconnect', () => {\n      bot.removeListener('move', botPosition)",
+  "    socket.on('boson:controls', (packet) => bot.viewer.emit('boson:controls', socket.id, packet))\n    socket.on('boson:control-release', () => bot.viewer.emit('boson:control-release', socket.id))\n    socket.on('disconnect', () => {\n      bot.viewer.emit('boson:control-disconnect', socket.id)\n      bot.removeListener('move', botPosition)"
+)
+replaceExpected(
   'viewer/lib/worldView.js',
   'name: e.name, pos: e.position, width: e.width, height: e.height, username: e.username',
   "name: ['MiraGardener', 'TobinCart', 'PipBaker'].includes(e.username) ? 'villager' : e.name, pos: e.position, width: e.width, height: e.height, username: e.username",
@@ -133,10 +184,13 @@ replaceExpected(
   '"textures": {\n      "farmer": "textures/entity/villager/profession/farmer",',
   '"textures": {\n      "default": "textures/entity/villager/type/plains",\n      "farmer": "textures/entity/villager/profession/farmer",'
 )
-replaceExpected(
+replaceAnyExpected(
   'lib/index.js',
-  'let firstPositionUpdate = true\n',
-  'let firstPositionUpdate = true\nlet targetPose\nlet currentPose\nlet currentCameraDistance = 3.5\nlet previousFrameTime = performance.now()\n'
+  [
+    'let firstPositionUpdate = true\n',
+    'let firstPositionUpdate = true\nlet targetPose\nlet currentPose\nlet currentCameraDistance = 3.5\nlet previousFrameTime = performance.now()\n'
+  ],
+  'let firstPositionUpdate = true\nlet targetPose\nlet currentPose\nlet currentCameraDistance = 0.02\nlet previousFrameTime = performance.now()\n'
 )
 replaceExpected(
   'lib/index.js',
@@ -151,7 +205,12 @@ replaceExpected(
 replaceExpected(
   'lib/index.js',
   "const { Viewer, Entity } = require('../viewer')\n",
-  "const { Viewer, Entity } = require('../viewer')\nconst followCamera = require('./boson-follow-camera')\nconst FOLLOW_CAMERA_DISTANCE = 3.5\nconst CAMERA_COLLISION_RADIUS = 0.12\nconst CAMERA_COLLISION_CLEARANCE = 0.16\n"
+  "const { Viewer, Entity } = require('../viewer')\nconst followCamera = require('./boson-follow-camera')\nconst FOLLOW_CAMERA_DISTANCE = 3.5\nconst CAMERA_COLLISION_RADIUS = 0.12\nconst CAMERA_COLLISION_CLEARANCE = 0.16\nconst FIRST_PERSON_DISTANCE = 0.02\n"
+)
+replaceExpected(
+  'lib/index.js',
+  'const CAMERA_COLLISION_CLEARANCE = 0.16\n',
+  'const CAMERA_COLLISION_CLEARANCE = 0.16\nconst FIRST_PERSON_DISTANCE = 0.02\n'
 )
 replaceSection(
   'lib/index.js',
@@ -191,7 +250,10 @@ function updateFollowCamera (deltaSeconds) {
     }
   }
 
-  const { position, yaw, pitch, eyeHeight } = currentPose
+  const { position, eyeHeight } = currentPose
+  const localLookPose = window.bosonLookPose
+  const yaw = Number.isFinite(localLookPose?.yaw) ? localLookPose.yaw : currentPose.yaw
+  const pitch = Number.isFinite(localLookPose?.pitch) ? localLookPose.pitch : currentPose.pitch
   cameraPivot.set(position.x, position.y + eyeHeight, position.z)
   const direction = followCamera.viewDirection(yaw, pitch)
   cameraForward.set(direction.x, direction.y, direction.z).normalize()
@@ -217,17 +279,8 @@ function updateFollowCamera (deltaSeconds) {
     if (hit) hitDistances.push(hit.distance)
   }
 
-  const safeDistance = followCamera.resolveBoomDistance(
-    FOLLOW_CAMERA_DISTANCE,
-    hitDistances,
-    CAMERA_COLLISION_CLEARANCE
-  )
-  if (safeDistance < currentCameraDistance) {
-    currentCameraDistance = safeDistance
-  } else {
-    const zoomOutAmount = 1 - Math.exp(-4.5 * deltaSeconds)
-    currentCameraDistance += (safeDistance - currentCameraDistance) * zoomOutAmount
-  }
+  const safeDistance = FIRST_PERSON_DISTANCE
+  currentCameraDistance = safeDistance
 
   const posePosition = followCamera.cameraPosition(position, yaw, pitch, eyeHeight, currentCameraDistance)
   cameraPosition.set(posePosition.x, posePosition.y, posePosition.z)
@@ -243,7 +296,22 @@ function animate (frameTime) {
   updateFollowCamera(deltaSeconds)
   viewer.update()
   renderer.render(viewer.scene, viewer.camera)`,
-  'function updateFollowCamera (deltaSeconds)'
+  'const safeDistance = FIRST_PERSON_DISTANCE'
+)
+replaceExpected(
+  'lib/index.js',
+  '  const { position, yaw, pitch, eyeHeight } = currentPose\n  cameraPivot.set(position.x, position.y + eyeHeight, position.z)',
+  '  const { position, eyeHeight } = currentPose\n  const localLookPose = window.bosonLookPose\n  const yaw = Number.isFinite(localLookPose?.yaw) ? localLookPose.yaw : currentPose.yaw\n  const pitch = Number.isFinite(localLookPose?.pitch) ? localLookPose.pitch : currentPose.pitch\n  cameraPivot.set(position.x, position.y + eyeHeight, position.z)'
+)
+replaceExpected(
+  'lib/index.js',
+  '        botMesh = new Entity(\'1.16.4\', \'player\', viewer.scene).mesh\n        viewer.scene.add(botMesh)',
+  '        botMesh = new Entity(\'1.16.4\', \'player\', viewer.scene).mesh\n        botMesh.visible = false\n        viewer.scene.add(botMesh)'
+)
+replaceExpected(
+  'lib/index.js',
+  '  const safeDistance = followCamera.resolveBoomDistance(\n    FOLLOW_CAMERA_DISTANCE,\n    hitDistances,\n    CAMERA_COLLISION_CLEARANCE\n  )\n  if (safeDistance < currentCameraDistance) {\n    currentCameraDistance = safeDistance\n  } else {\n    const zoomOutAmount = 1 - Math.exp(-4.5 * deltaSeconds)\n    currentCameraDistance += (safeDistance - currentCameraDistance) * zoomOutAmount\n  }',
+  '  const safeDistance = FIRST_PERSON_DISTANCE\n  currentCameraDistance = safeDistance'
 )
 replaceExpected(
   'lib/index.js',
@@ -264,10 +332,13 @@ replaceExpected(
   )
 `
 )
-replaceExpected(
+replaceAnyExpected(
   'lib/index.js',
-  '  firstPositionUpdate = true\n  viewer.listen(socket)',
-  '  firstPositionUpdate = true\n  targetPose = undefined\n  currentPose = undefined\n  currentCameraDistance = FOLLOW_CAMERA_DISTANCE\n  viewer.listen(socket)'
+  [
+    '  firstPositionUpdate = true\n  viewer.listen(socket)',
+    '  firstPositionUpdate = true\n  targetPose = undefined\n  currentPose = undefined\n  currentCameraDistance = FOLLOW_CAMERA_DISTANCE\n  viewer.listen(socket)'
+  ],
+  '  firstPositionUpdate = true\n  targetPose = undefined\n  currentPose = undefined\n  currentCameraDistance = 0.02\n  viewer.listen(socket)'
 )
 replaceSection(
   'lib/index.js',
@@ -290,13 +361,14 @@ replaceSection(
         controls = null
       }
       currentPose = { ...targetPose, position: { ...targetPose.position } }
-      currentCameraDistance = FOLLOW_CAMERA_DISTANCE
+      currentCameraDistance = 0.02
       firstPositionUpdate = false
     }
 
     if (addMesh) {
       if (!botMesh) {
         botMesh = new Entity('1.16.4', 'player', viewer.scene).mesh
+        botMesh.visible = false
         viewer.scene.add(botMesh)
       }
       new TWEEN.Tween(botMesh.position).to({ x: pos.x, y: pos.y, z: pos.z }, 50).start()
@@ -320,9 +392,9 @@ replaceAnyExpected(
   'public/index.html',
   [
     '  <body>\n    <div class="camera-help" role="status">Drag to look · scroll to zoom · right-drag to pan</div>\n',
-    '  <body>\n'
+    '  <body>\n    <div class="camera-help" role="status">Third-person view follows the explorer’s look direction</div>\n'
   ],
-  '  <body>\n    <div class="camera-help" role="status">Third-person view follows the explorer’s look direction</div>\n'
+  '  <body>\n    <div class="camera-help" role="status">Click the world to play · WASD move · mouse look · Esc releases controls</div>\n'
 )
 
 fs.copyFileSync(path.join(__dirname, 'follow-camera.cjs'), path.join(viewerRoot, 'lib', 'boson-follow-camera.js'))
@@ -335,3 +407,6 @@ if (build.error || build.status !== 0) throw build.error || new Error(`Prismarin
   const updated = source.replace(/if\([\w$]+\.position\.y<0\)continue;?/g, '')
   if (updated !== source) fs.writeFileSync(filePath, updated)
 }
+
+if (!patchAssetsComplete()) throw new Error('Prismarine Viewer patch verification failed after build')
+fs.writeFileSync(markerPath, `${JSON.stringify({ revision: PATCH_REVISION, hash: patchHash })}\n`, { mode: 0o600 })

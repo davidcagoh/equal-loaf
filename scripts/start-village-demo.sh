@@ -182,6 +182,8 @@ if [[ -z "${BOSON_PTT_ENV_FILE+x}" && -f "$PROJECT_ROOT/.env" ]]; then
   export BOSON_PTT_ENV_FILE="$PROJECT_ROOT/.env"
 fi
 
+node "$PROJECT_ROOT/packages/minecraft/scripts/apply-prismarine-viewer-fix.cjs"
+
 echo "Starting loopback Minecraft ${MC_VERSION} with configured Java: $JAVA_BIN"
 bash "$SCRIPT_DIR/start-minecraft-world.sh" >"$SERVER_LOG" 2>&1 &
 server_pid=$!
