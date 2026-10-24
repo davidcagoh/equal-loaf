@@ -92,4 +92,20 @@ let previousFrameTime = performance.now()
   return source;
 }
 
-module.exports = { normalizeIndexSource };
+function normalizeVillagerTextureSource(source) {
+  const overlayTexture = '"default": "textures/entity/villager/type/plains"'
+  const baseTexture = '"default": "textures/entity/villager/villager"'
+  if (source.includes(baseTexture)) return source
+  if (source.includes(overlayTexture)) return source.replace(overlayTexture, baseTexture)
+
+  const professionTextures = '"textures": {\n      "farmer": "textures/entity/villager/profession/farmer",'
+  if (!source.includes(professionTextures)) {
+    throw new Error('Could not find expected villager texture mapping')
+  }
+  return source.replace(
+    professionTextures,
+    `"textures": {\n      ${baseTexture},\n      "farmer": "textures/entity/villager/profession/farmer",`
+  )
+}
+
+module.exports = { normalizeIndexSource, normalizeVillagerTextureSource }

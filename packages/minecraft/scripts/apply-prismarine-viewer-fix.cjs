@@ -2,7 +2,7 @@ const fs = require('node:fs')
 const path = require('node:path')
 const crypto = require('node:crypto')
 const { spawnSync } = require('node:child_process')
-const { normalizeIndexSource } = require('./prismarine-viewer-patch.cjs')
+const { normalizeIndexSource, normalizeVillagerTextureSource } = require('./prismarine-viewer-patch.cjs')
 
 const viewerRoot = path.join(__dirname, '..', 'node_modules', 'prismarine-viewer')
 const webpackPath = process.env.BOSON_WEBPACK_BIN || path.join(__dirname, '..', 'node_modules', '.bin', 'webpack')
@@ -17,7 +17,7 @@ if (viewerPackage.version !== '1.33.0') {
   throw new Error(`Expected prismarine-viewer@1.33.0, found ${viewerPackage.version}`)
 }
 
-const PATCH_REVISION = 'boson-first-person-controls-resident-models-v4'
+const PATCH_REVISION = 'boson-first-person-controls-complete-villager-texture-v5'
 const markerPath = path.join(viewerRoot, '.boson-patch-state.json')
 const patchHash = crypto.createHash('sha256')
   .update(PATCH_REVISION)
@@ -33,6 +33,7 @@ const patchAssetsComplete = () => {
     const bundle = fs.readFileSync(path.join(viewerRoot, 'public', 'index.js'), 'utf8')
     const worker = fs.readFileSync(path.join(viewerRoot, 'public', 'worker.js'), 'utf8')
     const worldView = fs.readFileSync(path.join(viewerRoot, 'viewer', 'lib', 'worldView.js'), 'utf8')
+    const entityModels = fs.readFileSync(path.join(viewerRoot, 'viewer', 'lib', 'entity', 'entities.json'), 'utf8')
     return viewerSource.includes('const safeDistance = FIRST_PERSON_DISTANCE')
       && viewerSource.includes('localLookPose')
       && !viewerSource.includes('const currentCameraDistance = 3.5')
@@ -41,6 +42,7 @@ const patchAssetsComplete = () => {
       && page.includes('Click the world to play · WASD move · mouse look')
       && bundle.includes('bosonLookPose')
       && worldView.includes("['Anna', 'James', 'Thomas'].includes(e.username) ? 'villager' : e.name")
+      && entityModels.includes('"default": "textures/entity/villager/villager"')
       && !/if\([\w$]+\.position\.y<0\)continue;?/.test(worker)
   } catch {
     return false
@@ -194,11 +196,12 @@ replaceAnyExpected(
   "name: ['Anna', 'James', 'Thomas'].includes(e.username) ? 'villager' : e.name, pos: e.position, width: e.width, height: e.height, username: e.username",
   2,
 )
-replaceExpected(
-  'viewer/lib/entity/entities.json',
-  '"textures": {\n      "farmer": "textures/entity/villager/profession/farmer",',
-  '"textures": {\n      "default": "textures/entity/villager/type/plains",\n      "farmer": "textures/entity/villager/profession/farmer",'
-)
+{
+  const entityModelsPath = path.join(viewerRoot, 'viewer', 'lib', 'entity', 'entities.json')
+  const source = fs.readFileSync(entityModelsPath, 'utf8')
+  const normalized = normalizeVillagerTextureSource(source)
+  if (normalized !== source) fs.writeFileSync(entityModelsPath, normalized)
+}
 replaceAnyExpected(
   'lib/index.js',
   [

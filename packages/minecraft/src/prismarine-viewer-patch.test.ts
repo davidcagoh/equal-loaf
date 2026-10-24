@@ -3,9 +3,40 @@ import { createRequire } from 'node:module';
 import test from 'node:test';
 
 const require = createRequire(import.meta.url);
-const { normalizeIndexSource } = require('../scripts/prismarine-viewer-patch.cjs') as {
+const { normalizeIndexSource, normalizeVillagerTextureSource } = require('../scripts/prismarine-viewer-patch.cjs') as {
   normalizeIndexSource(source: string): string;
+  normalizeVillagerTextureSource(source: string): string;
 };
+
+test('villager model uses the complete base texture so its head UVs are opaque', () => {
+  const source = `"villager": {
+    "textures": {
+      "default": "textures/entity/villager/type/plains",
+      "farmer": "textures/entity/villager/profession/farmer"
+    }
+  }`;
+
+  const normalized = normalizeVillagerTextureSource(source);
+
+  assert.match(normalized, /"default": "textures\/entity\/villager\/villager"/);
+  assert.match(normalized, /"farmer": "textures\/entity\/villager\/profession\/farmer"/);
+  assert.equal(normalizeVillagerTextureSource(normalized), normalized);
+});
+
+test('villager texture patch inserts the base atlas when upstream has no default mapping', () => {
+  const source = `"villager": {
+    "textures": {
+      "farmer": "textures/entity/villager/profession/farmer",
+      "librarian": "textures/entity/villager/profession/librarian"
+    }
+  }`;
+
+  const normalized = normalizeVillagerTextureSource(source);
+
+  assert.match(normalized, /"default": "textures\/entity\/villager\/villager"/);
+  assert.match(normalized, /"farmer": "textures\/entity\/villager\/profession\/farmer"/);
+  assert.match(normalized, /"librarian": "textures\/entity\/villager\/profession\/librarian"/);
+});
 
 test('patch normalization repairs a stale third-person viewer with duplicate declarations idempotently', () => {
   const stale = `/* global THREE */
