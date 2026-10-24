@@ -75,7 +75,7 @@ const residents = [
   { turnId: 'turn_00000002', residentSessionId: 'session_mira_0002', residentId: 'mira', speakerName: 'Anna', voice: 'chloe', reuseSession: false },
 ];
 
-function setupClient(options: { enableInputTranscription?: boolean; inputTranscriptionTimeoutMs?: number } = {}) {
+function setupClient(options: Record<string, any> & { enableInputTranscription?: boolean; inputTranscriptionTimeoutMs?: number } = {}) {
   const requests: Array<{ path: string; body: any }> = [];
   const statuses: string[] = [];
   let beginIndex = 0;
@@ -98,7 +98,7 @@ function setupClient(options: { enableInputTranscription?: boolean; inputTranscr
     getPositionSocket: () => null,
     ...options,
     onStatus: (status: string) => statuses.push(status),
-    mediaDevices: { getUserMedia: async () => {
+    mediaDevices: options.mediaDevices ?? { getUserMedia: async () => {
       micRequests += 1;
       return { getTracks: () => [{ stop() {} }] };
     } },
@@ -207,6 +207,143 @@ test('actual client ends a begin request canceled by P release before credential
   assert.equal(requests.includes('/boson-ptt/native/end'), true);
   assert.equal(micRequests, 0);
   client.stop();
+});
+
+test('native begin with no nearby resident reports actionable proximity guidance', async () => {
+  FakeSocket.instances = []; FakeAudioContext.instances = [];
+  const statuses: string[] = [];
+  let micRequests = 0;
+  const client = new NativeResidentAudioClient({
+    fetchImpl: async () => ({ ok: false, status: 409, json: async () => ({ available: false,
+      error: 'No resident is within 8 blocks. Walk toward a villager and try again when you are closer.' }) }),
+    WebSocketClass: FakeSocket as any, AudioContextClass: FakeAudioContext as any, AudioWorkletNodeClass: FakeWorkletNode as any,
+    EventSourceClass: undefined, getPositionSocket: () => null, onStatus: (status: string) => statuses.push(status),
+    mediaDevices: { getUserMedia: async () => { micRequests += 1; return { getTracks: () => [] }; } },
+  });
+  await client.beginHeldTurn('key');
+  assert.deepEqual(statuses, ['connecting', 'no_nearby_resident']);
+  assert.equal(micRequests, 0);
+  client.stop();
+});
+
+test('default browser fetch retains its Window receiver when called through the native client', async () => {
+  FakeSocket.instances = []; FakeAudioContext.instances = [];
+  const originalFetch = globalThis.fetch;
+  const descriptor = Object.getOwnPropertyDescriptor(globalThis, 'fetch');
+  const statuses: string[] = [];
+  let fetchCalls = 0;
+  globalThis.fetch = async function (this: typeof globalThis) {
+    assert.equal(this, globalThis, 'Window.fetch must retain its receiver');
+    fetchCalls += 1;
+    return { ok: false, status: 409, json: async () => ({ available: false,
+      error: 'No resident is within 8 blocks. Walk toward a villager and try again.' }) } as Response;
+  };
+  const client = new NativeResidentAudioClient({
+    WebSocketClass: FakeSocket as any, AudioContextClass: FakeAudioContext as any, AudioWorkletNodeClass: FakeWorkletNode as any,
+    EventSourceClass: undefined, getPositionSocket: () => null, onStatus: (status: string) => statuses.push(status),
+  });
+  try {
+    await client.beginHeldTurn('key');
+    assert.equal(fetchCalls, 1);
+    assert.deepEqual(statuses, ['connecting', 'no_nearby_resident']);
+  } finally {
+    client.stop();
+    if (descriptor) Object.defineProperty(globalThis, 'fetch', descriptor);
+    else delete (globalThis as any).fetch;
+  }
+});
+
+test('audio context initialization failures report allowlisted stage and exception name only', async () => {
+  FakeAudioContext.instances = [];
+  const statuses: string[] = [];
+  class DeniedAudioContext extends FakeAudioContext {
+    async resume() { throw Object.assign(new Error('raw browser failure details'), { name: 'NotAllowedError' }); }
+  }
+  const client = new NativeResidentAudioClient({
+    fetchImpl: async () => { throw new Error('must not reach native begin'); },
+    WebSocketClass: FakeSocket as any, AudioContextClass: DeniedAudioContext as any, AudioWorkletNodeClass: FakeWorkletNode as any,
+    EventSourceClass: undefined, getPositionSocket: () => null, onStatus: (status: string) => statuses.push(status),
+  });
+  await client.beginHeldTurn('key');
+  assert.deepEqual(statuses, ['startup_audio_context_resume_notallowederror']);
+  assert.equal(statuses.some((status) => status.includes('raw browser')), false);
+  client.stop();
+});
+
+test('startup failure-injection table reports safe stage/reason and releases server turns', async () => {
+  const readyBegin = { available: true, ...residents[0], instructions: 'Prompt for Thomas' };
+  const response = (payload: unknown, status = 200) => ({ ok: status >= 200 && status < 300, status, json: async () => payload });
+  class ConstructorFailure {
+    constructor() { throw Object.assign(new Error('private context detail'), { name: 'NotSupportedError' }); }
+  }
+  class WorkletFailureContext extends FakeAudioContext {
+    audioWorklet = { addModule: async () => { throw Object.assign(new Error('private worklet detail'), { name: 'NotSupportedError' }); } };
+  }
+  class GraphFailureNode { constructor() { throw Object.assign(new Error('private graph detail'), { name: 'OperationError' }); } }
+  class SessionMismatchSocket extends FakeSocket {
+    send(raw: string) {
+      const message = JSON.parse(raw); this.sent.push(message);
+      if (message.type === 'session.update') queueMicrotask(() => this.dispatch('message', { data: JSON.stringify({
+        type: 'session.updated', session: { output_modalities: ['audio'], audio: {
+          input: { format: { type: 'audio/pcm', rate: 24_000 }, turn_detection: null },
+          output: { format: { type: 'audio/pcm', rate: 24_000 }, voice: 'chloe' },
+        }, tools: [], tool_choice: 'none' },
+      }) }));
+    }
+  }
+  const cases = [
+    { name: 'context constructor', expected: 'startup_audio_context_create_notsupportederror', AudioContextClass: ConstructorFailure,
+      fetchImpl: async () => { throw new Error('fetch must not run'); } },
+    { name: 'native begin HTTP', expected: 'native_begin_http_503',
+      fetchImpl: async () => response({ available: false, error: 'Private backend explanation' }, 503) },
+    { name: 'native begin JSON', expected: 'native_begin_invalid_json_response',
+      fetchImpl: async () => ({ ok: true, status: 200, json: async () => { throw new SyntaxError('private response body'); } }) },
+    { name: 'native begin shape', expected: 'native_begin_invalid_native_begin_response',
+      fetchImpl: async () => response({ available: true, error: 'Do not display this response text' }) },
+    { name: 'credential HTTP', expected: 'native_credential_http_503', afterBegin: true,
+      fetchImpl: async (path: string) => path === '/boson-ptt/native/begin' ? response(readyBegin)
+        : response({ available: false, error: 'Private credential service explanation' }, 503) },
+    { name: 'credential shape', expected: 'native_credential_credential_unavailable', afterBegin: true,
+      fetchImpl: async (path: string) => path === '/boson-ptt/native/begin' ? response(readyBegin)
+        : response({ available: true, clientSecret: 'never-log-this' }) },
+    { name: 'session configuration ack', expected: 'realtime_session_ack_session_config_mismatch', afterBegin: true,
+      WebSocketClass: SessionMismatchSocket as any,
+      fetchImpl: async (path: string) => path === '/boson-ptt/native/begin' ? response(readyBegin)
+        : path === '/boson-ptt/native/credential' ? response({ available: true, clientSecret: 'bai-eph-test' }) : response({ accepted: true }) },
+    { name: 'microphone permission', expected: 'microphone_permission_denied', afterBegin: true,
+      mediaDevices: { getUserMedia: async () => { throw Object.assign(new Error('private permission detail'), { name: 'NotAllowedError' }); } },
+      fetchImpl: async (path: string) => path === '/boson-ptt/native/begin' ? response(readyBegin)
+        : path === '/boson-ptt/native/credential' ? response({ available: true, clientSecret: 'bai-eph-test' }) : response({ accepted: true }) },
+    { name: 'worklet loading', expected: 'audio_worklet_unavailable', afterBegin: true, AudioContextClass: WorkletFailureContext as any,
+      fetchImpl: async (path: string) => path === '/boson-ptt/native/begin' ? response(readyBegin)
+        : path === '/boson-ptt/native/credential' ? response({ available: true, clientSecret: 'bai-eph-test' }) : response({ accepted: true }) },
+    { name: 'capture graph', expected: 'capture_graph_unavailable', afterBegin: true, AudioWorkletNodeClass: GraphFailureNode as any,
+      fetchImpl: async (path: string) => path === '/boson-ptt/native/begin' ? response(readyBegin)
+        : path === '/boson-ptt/native/credential' ? response({ available: true, clientSecret: 'bai-eph-test' }) : response({ accepted: true }) },
+  ];
+
+  for (const scenario of cases) {
+    FakeSocket.instances = []; FakeAudioContext.instances = [];
+    const statuses: string[] = [];
+    const requests: string[] = [];
+    const originalFetch = scenario.fetchImpl;
+    const client = new NativeResidentAudioClient({
+      ...scenario,
+      fetchImpl: async (path: string, request: any) => { requests.push(path); return originalFetch(path, request); },
+      WebSocketClass: scenario.WebSocketClass ?? FakeSocket as any,
+      AudioContextClass: scenario.AudioContextClass ?? FakeAudioContext as any,
+      AudioWorkletNodeClass: scenario.AudioWorkletNodeClass ?? FakeWorkletNode as any,
+      mediaDevices: scenario.mediaDevices ?? { getUserMedia: async () => ({ getTracks: () => [{ stop() {} }] }) },
+      EventSourceClass: undefined, getPositionSocket: () => null, onStatus: (status: string) => statuses.push(status),
+    });
+    await client.beginHeldTurn('key');
+    await settle(); await settle();
+    assert.equal(statuses.at(-1), scenario.expected, `${scenario.name}: ${statuses.join(',')}`);
+    assert.equal(statuses.some((status) => /private|never-log-this/i.test(status)), false, `${scenario.name} must not expose raw details`);
+    if (scenario.afterBegin) assert.equal(requests.filter((path) => path === '/boson-ptt/native/end').length, 1,
+      `${scenario.name} must clean up its server turn exactly once`);
+    client.stop();
+  }
 });
 
 test('input transcription is disabled by default and does not gate proximity turn completion', async () => {

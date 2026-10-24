@@ -22,7 +22,7 @@ export class NativeResidentAudioClient {
     inputTranscriptionTimeoutMs = 8_000,
     onStatus = () => {},
   } = {}) {
-    this.fetch = fetchImpl;
+    this.fetch = fetchImpl === globalThis.fetch ? fetchImpl.bind(globalThis) : fetchImpl;
     this.WebSocket = WebSocketClass;
     this.AudioContext = AudioContextClass;
     this.AudioWorkletNode = AudioWorkletNodeClass;
@@ -46,6 +46,7 @@ export class NativeResidentAudioClient {
     this.capture = null;
     this.captureGeneration = 0;
     this.workletLoader = null;
+    this.failureStage = 'idle';
     this.started = false;
     this.destroyed = false;
     this.eventSource = null;
@@ -76,6 +77,7 @@ export class NativeResidentAudioClient {
     this.holdSource = source;
     const generation = ++this.heldGeneration;
     try {
+      this.failureStage = 'audio_context_create';
       await this.#ensureAudioContext();
       if (!this.#isHeld(generation)) return;
       if (this.turn) {
@@ -87,8 +89,10 @@ export class NativeResidentAudioClient {
       }
       await this.#beginTurn(generation);
     } catch (error) {
-      this.#showSafeFailure(error);
+      this.#showSafeFailure(error, this.failureStage);
       this.#releaseHeldState();
+    } finally {
+      this.failureStage = 'idle';
     }
   }
 
@@ -222,18 +226,21 @@ export class NativeResidentAudioClient {
   async #ensureAudioContext() {
     if (!this.AudioContext || !this.WebSocket || !this.AudioWorkletNode) throw new Error('audio_unavailable');
     if (!this.context) {
+      this.failureStage = 'audio_context_create';
       this.context = new this.AudioContext({ sampleRate: NATIVE_REALTIME_RATE });
       this.mixer = new NativeResidentPcmMixer({ context: this.context, onState: (event) => this.#mixerState(event) });
       if (this.listenerPosition) this.mixer.setListenerPosition(this.listenerPosition);
       for (const [residentId, position] of this.residentPositions) this.mixer.setSpeakerPosition(residentId, position);
       this.workletLoader = createRetryableWorkletLoader(() => this.context.audioWorklet.addModule('/boson-ptt-worklet.js'));
     }
+    this.failureStage = 'audio_context_resume';
     await this.context.resume();
   }
 
   async #beginTurn(generation) {
     if (!this.#isHeld(generation)) return;
     this.onStatus('connecting');
+    this.failureStage = 'native_begin';
     const begin = await this.#post('/boson-ptt/native/begin', {
       knownResidentSessionIds: [...this.connections.keys()].slice(-8),
     });
@@ -244,7 +251,13 @@ export class NativeResidentAudioClient {
     }
     let connection = this.connections.get(begin.residentSessionId);
     if (begin.reuseSession && !connection) throw new Error('resident_session_unavailable');
-    if (!connection) connection = await this.#createConnection(begin, generation);
+    if (!connection) {
+      try { connection = await this.#createConnection(begin, generation); }
+      catch (error) {
+        await this.#post('/boson-ptt/native/end', { turnId: begin.turnId, residentSessionId: begin.residentSessionId }).catch(() => undefined);
+        throw error;
+      }
+    }
     if (!connection) return;
     connection.turn = { ...begin, connection, generation, released: false, pendingNewTurn: false,
       waitingForCommit: false, responseInProgress: false, pendingInputTranscriptions: new Set(),
@@ -264,6 +277,7 @@ export class NativeResidentAudioClient {
   }
 
   async #createConnection(begin, generation) {
+    this.failureStage = 'native_credential';
     const credential = await this.#post('/boson-ptt/native/credential', {
       turnId: begin.turnId, residentSessionId: begin.residentSessionId,
     });
@@ -274,6 +288,7 @@ export class NativeResidentAudioClient {
       await this.#post('/boson-ptt/native/end', { turnId: begin.turnId, residentSessionId: begin.residentSessionId }).catch(() => undefined);
       return null;
     }
+    this.failureStage = 'realtime_websocket';
     const socket = new this.WebSocket(REALTIME_URL, ['realtime', `bai-client-secret.${credential.clientSecret}`]);
     credential.clientSecret = '';
     const connection = {
@@ -293,19 +308,19 @@ export class NativeResidentAudioClient {
       });
       socket.addEventListener('message', (message) => {
         if (typeof message.data !== 'string') return;
-        try { void this.handleRealtimeEvent(connection, JSON.parse(message.data)).catch(() => this.#failConnection(connection, 'provider_error')); }
+        try { void this.handleRealtimeEvent(connection, JSON.parse(message.data)).catch((error) => this.#failConnection(connection, failureCodeFromError(error))); }
         catch { this.onStatus('provider_event_invalid'); }
       });
       socket.addEventListener('error', () => this.#failConnection(connection, 'provider_connection_failed'));
       socket.addEventListener('close', () => this.#failConnection(connection, 'provider_connection_closed'));
     });
     const timer = setTimeout(() => connection.rejectReady?.(new Error('session_ack_timeout')), 15_000);
+    this.failureStage = 'realtime_session_ack';
     try { await connection.readyPromise; }
     catch (error) {
       connection.failed = true;
       this.connections.delete(begin.residentSessionId);
       try { socket.close(1000, 'native setup failed'); } catch { /* already closed */ }
-      await this.#post('/boson-ptt/native/end', { turnId: begin.turnId, residentSessionId: begin.residentSessionId }).catch(() => undefined);
       throw error;
     } finally { clearTimeout(timer); }
     connection.turn = this.turn;
@@ -314,6 +329,7 @@ export class NativeResidentAudioClient {
 
   async #startCapture(turn) {
     if (!this.#isHeld(turn.generation) || turn.connection !== this.turn?.connection) return;
+    this.failureStage = 'microphone_capture';
     const generation = ++this.captureGeneration;
     const isCurrent = () => this.#isHeld(turn.generation) && this.captureGeneration === generation
       && this.turn?.connection === turn.connection;
@@ -344,8 +360,9 @@ export class NativeResidentAudioClient {
       disconnectCapture: (capture) => this.#disconnectCapture(capture),
     });
     if (!isCurrent()) return;
+    this.failureStage = 'idle';
     if (!result.capture) {
-      this.onStatus(result.reason ?? 'microphone_unavailable');
+      turn.finalStatus = result.reason ?? 'microphone_unavailable';
       this.releaseHeldTurn();
       return;
     }
@@ -541,7 +558,7 @@ export class NativeResidentAudioClient {
         if (turn.pendingNewTurn && this.held) void this.#beginTurn(this.heldGeneration).catch((error) => {
           this.#showSafeFailure(error); this.#releaseHeldState();
         });
-        else this.onStatus('ready');
+        else this.onStatus(turn.finalStatus ?? 'ready');
       });
   }
 
@@ -568,8 +585,13 @@ export class NativeResidentAudioClient {
   async #post(path, body) {
     const response = await this.fetch(path, { method: 'POST', credentials: 'same-origin', cache: 'no-store', redirect: 'error',
       headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) });
-    const value = await response.json().catch(() => ({}));
-    if (!response.ok) throw new Error(safeCode(value.error) || `http_${response.status}`);
+    let value;
+    try { value = await response.json(); }
+    catch {
+      if (response.ok) throw new Error('invalid_json_response');
+      value = {};
+    }
+    if (!response.ok) throw new Error(structuredPttFailure(path, response.status, value));
     return value;
   }
 
@@ -602,16 +624,24 @@ export class NativeResidentAudioClient {
         } else this.#finishSpeechItem(connection, item, 'interrupted');
       }
       this.#maybeEndTurn(turn);
-    } else if (connection.pendingBegin) {
-      void this.#post('/boson-ptt/native/end', { turnId: connection.pendingBegin.turnId,
-        residentSessionId: connection.residentSessionId }).catch(() => undefined);
     }
     if (this.connections.get(connection.residentSessionId) === connection) this.connections.delete(connection.residentSessionId);
     this.onStatus(code);
   }
 
-  #showSafeFailure(error) {
-    this.onStatus(safeCode(error instanceof Error ? error.message : 'audio_failed'));
+  #showSafeFailure(error, stage = 'unknown') {
+    const code = safeCode(error instanceof Error ? error.message : '');
+    if (code === 'no_nearby_resident' || /^native_(?:begin|credential)_http_[1-5]\d\d$/.test(code)) {
+      this.onStatus(code);
+      return;
+    }
+    const safeStage = SAFE_FAILURE_STAGES.has(stage) ? stage : 'unknown';
+    if (SAFE_INTERNAL_FAILURES.has(code)) {
+      this.onStatus(`${safeStage}_${code}`);
+      return;
+    }
+    const exception = safeExceptionName(error).toLowerCase();
+    this.onStatus(`startup_${safeStage}_${exception}`);
   }
 
   #isHeld(generation) { return this.held && !this.destroyed && this.heldGeneration === generation; }
@@ -706,11 +736,36 @@ function createSessionConfig(instructions, voice, enableInputTranscription = fal
 function validateBegin(value) {
   if (value?.available !== true || !safeProviderId(value.turnId) || !safeProviderId(value.residentSessionId)
     || !safeProviderId(value.residentId) || typeof value.speakerName !== 'string' || typeof value.instructions !== 'string'
-    || !['chloe', 'oliver', 'jake'].includes(value.voice) || typeof value.reuseSession !== 'boolean') throw new Error(safeCode(value?.error) || 'native_begin_unavailable');
+    || !['chloe', 'oliver', 'jake'].includes(value.voice) || typeof value.reuseSession !== 'boolean') throw new Error('invalid_native_begin_response');
 }
 
 function safeProviderId(value) { return typeof value === 'string' && /^[A-Za-z0-9:_-]{1,128}$/.test(value) ? value : null; }
 function safeCode(value) { return typeof value === 'string' && /^[a-z0-9_.-]{1,80}$/i.test(value) ? value : ''; }
+const SAFE_FAILURE_STAGES = new Set(['audio_context_create', 'audio_context_resume', 'native_begin', 'native_credential',
+  'realtime_websocket', 'realtime_session_ack', 'microphone_capture', 'unknown']);
+const SAFE_EXCEPTION_NAMES = new Set(['AbortError', 'NotAllowedError', 'SecurityError', 'NotFoundError', 'DevicesNotFoundError',
+  'NotReadableError', 'InvalidStateError', 'NotSupportedError', 'NetworkError', 'TimeoutError', 'TypeError', 'RangeError',
+  'SyntaxError', 'DataError', 'OperationError', 'UnknownError', 'Error']);
+const SAFE_INTERNAL_FAILURES = new Set(['audio_unavailable', 'resident_session_unavailable', 'credential_unavailable',
+  'session_config_mismatch', 'session_ack_timeout', 'provider_connection_failed', 'provider_connection_closed',
+  'provider_error', 'invalid_json_response', 'invalid_native_begin_response']);
+function safeExceptionName(error) {
+  const name = error && typeof error === 'object' && typeof error.name === 'string' ? error.name : 'Error';
+  return SAFE_EXCEPTION_NAMES.has(name) ? name : 'Error';
+}
+function failureCodeFromError(error) {
+  const code = safeCode(error instanceof Error ? error.message : '');
+  return SAFE_INTERNAL_FAILURES.has(code) ? code : 'provider_error';
+}
+function structuredPttFailure(path, status, payload) {
+  const message = typeof payload?.error === 'string' ? payload.error.toLowerCase() : '';
+  if (path === '/boson-ptt/native/begin') {
+    if (status === 409 && payload?.available === false && /no resident/.test(message)) return 'no_nearby_resident';
+    return `native_begin_http_${status}`;
+  }
+  if (path === '/boson-ptt/native/credential') return `native_credential_http_${status}`;
+  return `native_request_http_${status}`;
+}
 function validPosition(value) { return Boolean(value && ['x', 'y', 'z'].every((key) => Number.isFinite(value[key]))); }
 function appendBounded(previous, next, max) { return `${previous ?? ''}${next}`.slice(0, max); }
 function utf8Length(value) { return new TextEncoder().encode(value).length; }
@@ -719,6 +774,7 @@ function isEditable(target) {
     || target?.closest?.('[contenteditable=""], [contenteditable="true"], [role="textbox"]'));
 }
 function statusText(value) {
+  if (value === 'no_nearby_resident') return 'Walk closer to a villager';
   if (value === 'ready' || String(value).startsWith('ready:')) return 'Ready';
   if (value === 'connecting') return 'Connecting';
   if (value === 'listening') return 'Listening';
