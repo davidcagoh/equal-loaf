@@ -105,7 +105,7 @@ stop_children() {
   trap - EXIT INT TERM
   local pid attempt running
   for pid in "${child_pids[@]}"; do kill -INT "$pid" 2>/dev/null || true; done
-  for attempt in {1..12}; do
+  for attempt in {1..30}; do
     running=false
     for pid in "${child_pids[@]}"; do
       if job_running "$pid"; then running=true; break; fi
