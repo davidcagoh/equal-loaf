@@ -88,10 +88,14 @@ PY
 readonly LOG_DIR="$MC_CACHE_DIR/boson-demo-logs"
 mkdir -p "$LOG_DIR"
 readonly RUN_ID="$(date +%Y%m%d-%H%M%S)"
+readonly IPC_DIR="$(mktemp -d /tmp/bv.XXXXXX)"
+chmod 700 "$IPC_DIR"
+readonly IPC_SOCKET="$IPC_DIR/village.sock"
 readonly SERVER_LOG="$LOG_DIR/server-${RUN_ID}.log"
 readonly COMPANION_LOG="$LOG_DIR/companion-${RUN_ID}.log"
 readonly EXPLORER_LOG="$LOG_DIR/explorer-${RUN_ID}.log"
 readonly VILLAGE_LOG="$LOG_DIR/village-${RUN_ID}.log"
+export BOSON_VILLAGE_IPC_SOCKET="$IPC_SOCKET"
 child_pids=()
 cleaning_up=false
 
@@ -118,6 +122,7 @@ stop_children() {
     for pid in "${child_pids[@]}"; do job_running "$pid" && kill -KILL "$pid" 2>/dev/null || true; done
   fi
   for pid in "${child_pids[@]}"; do wait "$pid" 2>/dev/null || true; done
+  rm -rf "$IPC_DIR"
   echo "Boson village demo stopped; child processes have exited."
 }
 
@@ -173,6 +178,9 @@ export BOSON_MC_PORT="$MC_PORT"
 export BOSON_MC_PLAYER="$PLAYER_NAME"
 export BOSON_VIEWER_PORT="$COMPANION_VIEWER_PORT"
 export BOSON_EXPLORER_VIEWER_PORT="$VIEWER_PORT"
+if [[ -z "${BOSON_PTT_ENV_FILE+x}" && -f "$PROJECT_ROOT/.env" ]]; then
+  export BOSON_PTT_ENV_FILE="$PROJECT_ROOT/.env"
+fi
 
 echo "Starting loopback Minecraft ${MC_VERSION} with configured Java: $JAVA_BIN"
 bash "$SCRIPT_DIR/start-minecraft-world.sh" >"$SERVER_LOG" 2>&1 &
@@ -194,18 +202,18 @@ wait_for_log "$explorer_pid" "$EXPLORER_LOG" "Account-free explorer ${PLAYER_NAM
 wait_for_log "$explorer_pid" "$EXPLORER_LOG" "Explorer viewer listening on http://127.0.0.1:${VIEWER_PORT}" "Explorer-attached viewer ready" 60
 wait_for_http "$explorer_pid" "http://127.0.0.1:${VIEWER_PORT}/" "Explorer viewer HTTP endpoint responds" 30
 
-node scripts/run-village-with-dialogue-relay.mjs >"$VILLAGE_LOG" 2>&1 &
+node --experimental-strip-types scripts/run-village-with-dialogue-relay.mjs >"$VILLAGE_LOG" 2>&1 &
 village_pid=$!
 child_pids+=("$village_pid")
 wait_for_log "$village_pid" "$VILLAGE_LOG" 'Village simulator active; forwarding dialogue' "Village simulator and dialogue relay ready" 30
 wait_for_log "$village_pid" "$VILLAGE_LOG" 'MiraGardener .* joined at' "MiraGardener joined" 60
 wait_for_log "$village_pid" "$VILLAGE_LOG" 'TobinCart .* joined at' "TobinCart joined" 60
 wait_for_log "$village_pid" "$VILLAGE_LOG" 'PipBaker .* joined at' "PipBaker joined" 60
-wait_for_log "$village_pid" "$VILLAGE_LOG" 'Relayed dialogue · ' "First village dialogue event reached the viewer" 180
+wait_for_log "$village_pid" "$VILLAGE_LOG" 'Relayed village dialogue event.' "First village dialogue event reached the viewer" 180
 
 echo
 echo "Village explorer is live: http://127.0.0.1:${VIEWER_PORT}/"
-echo "The camera follows ${PLAYER_NAME}. Open that link and select Enable audio. Browser speech uses local voices; no microphone or API key is used."
+echo "Use the first-person controls to walk and look around. Hold Push to talk to address the nearest resident; audio is sent to Boson only while held."
 echo "Runtime logs: $LOG_DIR (run $RUN_ID). Press Ctrl+C to stop the server and all demo processes."
 while :; do
   for pid in "${child_pids[@]}"; do

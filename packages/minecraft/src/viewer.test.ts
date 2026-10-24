@@ -4,7 +4,7 @@ import { spawnSync } from 'node:child_process';
 import { createRequire } from 'node:module';
 import { readFileSync } from 'node:fs';
 import { createConnection } from 'node:net';
-import { createServer, type IncomingMessage, type Server } from 'node:http';
+import { createServer, get as httpGet, type IncomingMessage, type Server } from 'node:http';
 import { dirname, join } from 'node:path';
 import type { Duplex } from 'node:stream';
 import test from 'node:test';
@@ -126,6 +126,14 @@ test('serves subtitles client and relays validated dialogue over same-origin SSE
   try {
     const page = await fetch(`http://127.0.0.1:${port}/`, { headers: { origin: `http://127.0.0.1:${port}` } });
     assert.match(await page.text(), /boson-audio\.js/);
+    const pttClient = await fetch(`http://127.0.0.1:${port}/boson-ptt.js`, { headers: { origin: `http://127.0.0.1:${port}` } });
+    assert.equal(pttClient.status, 200);
+    assert.match(await pttClient.text(), /from '\.\/village-vocabulary\.js'/);
+    const vocabulary = await fetch(`http://127.0.0.1:${port}/village-vocabulary.js`, { headers: { origin: `http://127.0.0.1:${port}` } });
+    assert.equal(vocabulary.status, 200);
+    assert.match(await vocabulary.text(), /ask_about_known_topic/);
+    const mixer = await fetch(`http://127.0.0.1:${port}/audio/spatial-voice-mixer.js`, { headers: { origin: `http://127.0.0.1:${port}` } });
+    assert.equal(mixer.status, 200);
     const stream = await fetch(`http://127.0.0.1:${port}/boson-dialogue`, { headers: { origin: `http://127.0.0.1:${port}` } });
     assert.equal(stream.status, 200);
     activeReader = stream.body?.getReader();
@@ -182,6 +190,17 @@ test('binds the Prismarine HTTP viewer to loopback only', async () => {
     assert.equal(page.status, 200);
     assert.equal(page.headers.get('content-security-policy'), 'frame-ancestors http://127.0.0.1:8000 http://localhost:8000');
     assert.match(await page.text(), /boson-audio\.js/);
+    const browserNavigation = await new Promise<{ statusCode?: number }>((resolve, reject) => {
+      const request = httpGet(`http://127.0.0.1:${port}/`, {
+        headers: { 'sec-fetch-site': 'cross-site', 'sec-fetch-mode': 'navigate', 'sec-fetch-dest': 'document' },
+      }, (response) => { response.resume(); resolve(response); });
+      request.once('error', reject);
+    });
+    assert.equal(browserNavigation.statusCode, 200);
+    const crossSiteApi = await fetch(`http://127.0.0.1:${port}/boson-ptt/status`, {
+      headers: { origin: 'https://attacker.example', 'sec-fetch-site': 'cross-site', 'sec-fetch-mode': 'cors', 'sec-fetch-dest': 'empty' },
+    });
+    assert.equal(crossSiteApi.status, 403);
     const rejected = await fetch(`http://127.0.0.1:${port}/`, { headers: { origin: 'https://attacker.example' } });
     assert.equal(rejected.status, 403);
     const fallback = await fetch(`http://127.0.0.1:${port}/fallback`, { headers: { origin: 'http://127.0.0.1:8000' } });

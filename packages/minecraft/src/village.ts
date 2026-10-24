@@ -1,6 +1,27 @@
 import mineflayer from 'mineflayer';
 import pathfinderPackage from 'mineflayer-pathfinder';
-import { createVillageDialogueEvent } from './village-event.ts';
+import { createInterface } from 'node:readline';
+import {
+  authoredLine,
+  createVillageCognitionState,
+  getResidentKnowledgeContext,
+  reduceVillageObservation,
+  selectResidentIntent,
+  VILLAGE_FACTS,
+  validateResidentIntent,
+  type ResidentIntentContext,
+  type SelectedResidentIntent,
+  type VillageObservation,
+} from './village-cognition.ts';
+import {
+  asSemanticResponse,
+  createVillageDialogueEvent,
+  isVillagePttCommand,
+  MAX_PTT_COMMAND_BYTES,
+  type VillagePttAck,
+  type VillagePttBeginContext,
+  type VillagePttCommand,
+} from './village-event.ts';
 import { villageDialogue, villageMysteryDialogue, villageProfiles } from './village-profiles.ts';
 import { distance3d, isWithinExplorerWatchRange, rendezvousExchange, shouldPauseForExplorer, VillageAi } from './village-ai.ts';
 
@@ -25,8 +46,16 @@ const homePositions = new Map<string, { x: number; y: number; z: number }>();
 const meetingResidents = new Set<string>();
 const lastWatchTurnAt = new Map<string, number>();
 const awarenessTimers: ReturnType<typeof setInterval>[] = [];
+const activePttTurns = new Map<string, { residentId: string; startedAt: number; expiresAt: number; beginAck: VillagePttAck }>();
+const resolvedPttTurns = new Map<string, 'cancelled' | 'completed' | 'expired'>();
+const cognitionState = { current: createVillageCognitionState() };
+const PLAYER_RESPONSE_RADIUS = 8;
+const RESIDENT_HEARING_RADIUS = 12;
+const PTT_TURN_TTL_MS = 30_000;
+const MAX_ACTIVE_PTT_TURNS = 8;
 const ai = new VillageAi({ enabled: process.env.BOSON_VILLAGE_AI === '1', jevKey: process.env.TYPESAFE_API_KEY, gatewayKey: process.env.AI_GATEWAY_API_KEY });
 const plannedLineIds = new Map<string, string>();
+let dialogueSequence = 0;
 const explorerName = process.env.BOSON_MC_PLAYER ?? 'DemoPlayer';
 
 function explorerFor(bot: NonNullable<ReturnType<typeof bots.get>>) {
@@ -49,9 +78,293 @@ function wait(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
+function currentExplorerPosition(): { x: number; y: number; z: number } | null {
+  for (const bot of bots.values()) {
+    const explorer = explorerFor(bot);
+    if (explorer) return { x: explorer.position.x, y: explorer.position.y, z: explorer.position.z };
+  }
+  return null;
+}
+
+function residentDistances(explorer: { x: number; y: number; z: number }): Array<{ residentId: string; distance: number }> {
+  return villageProfiles.flatMap(({ id }) => {
+    const bot = bots.get(id);
+    return bot?.entity ? [{ residentId: id, distance: distance3d(bot.entity.position, explorer) }] : [];
+  }).sort((left, right) => left.distance - right.distance || left.residentId.localeCompare(right.residentId));
+}
+
+function residentIdsNearPoint(point: { x: number; y: number; z: number }, radius: number): string[] {
+  return villageProfiles.flatMap(({ id }) => {
+    const bot = bots.get(id);
+    return bot?.entity && distance3d(bot.entity.position, point) <= radius ? [id] : [];
+  });
+}
+
+function currentRoutineStop(residentId: string): string {
+  const bot = bots.get(residentId);
+  const home = homePositions.get(residentId);
+  const profile = villageProfiles.find(({ id }) => id === residentId);
+  if (!bot?.entity || !home || !profile) return profile?.routine[0]?.id ?? 'market-well';
+  const position = bot.entity.position;
+  const nearest = profile.routine.map((stopAt) => {
+    const [offsetX, offsetZ] = stopAt.offset;
+    const target = { x: home.x + offsetX, y: home.y, z: home.z + offsetZ };
+    return { id: stopAt.id, distance: distance3d(position, target) };
+  }).sort((left, right) => left.distance - right.distance || left.id.localeCompare(right.id))[0];
+  return nearest?.id ?? profile.routine[0]?.id ?? 'market-well';
+}
+
+function freshPttBeginContext(residentId: string, locationId: string): VillagePttBeginContext | null {
+  const profile = villageProfiles.find(({ id }) => id === residentId);
+  const state = cognitionState.current;
+  if (!profile || !state.residents[residentId]) return null;
+  const knowledge = getResidentKnowledgeContext(state, residentId);
+  if (knowledge.responseOptions.length === 0) return null;
+  return {
+    id: profile.id,
+    name: profile.username,
+    role: profile.role,
+    goal: knowledge.goal,
+    locationId,
+    topics: knowledge.topics,
+    facts: knowledge.facts,
+    responseOptions: knowledge.responseOptions,
+    relationship: knowledge.relationship,
+  };
+}
+
+function sendPttAck(ack: VillagePttAck): void {
+  process.stdout.write(`${JSON.stringify(ack)}\n`);
+}
+
+function prunePttTurns(now = Date.now()): void {
+  for (const [turnId, turn] of activePttTurns) {
+    if (now > turn.expiresAt) {
+      activePttTurns.delete(turnId);
+      resolvedPttTurns.set(turnId, 'expired');
+    }
+  }
+  while (resolvedPttTurns.size > 256) {
+    const oldest = resolvedPttTurns.keys().next().value as string | undefined;
+    if (!oldest) break;
+    resolvedPttTurns.delete(oldest);
+  }
+}
+
+function beginPttTurn(command: Extract<VillagePttCommand, { type: 'ptt.begin' }>): void {
+  prunePttTurns();
+  const existing = activePttTurns.get(command.turnId);
+  if (existing) {
+    sendPttAck(existing.beginAck);
+    return;
+  }
+  if (resolvedPttTurns.has(command.turnId)) {
+    sendPttAck({ version: 1, type: 'ptt.ack', phase: 'begin', turnId: command.turnId, status: 'duplicate' });
+    return;
+  }
+  if (activePttTurns.size >= MAX_ACTIVE_PTT_TURNS) {
+    sendPttAck({ version: 1, type: 'ptt.ack', phase: 'begin', turnId: command.turnId, status: 'unavailable' });
+    return;
+  }
+  const explorer = currentExplorerPosition();
+  const now = Date.now();
+  const nearest = explorer ? residentDistances(explorer).find(({ residentId, distance }) => {
+    if (distance > PLAYER_RESPONSE_RADIUS) return false;
+    const locationId = currentRoutineStop(residentId);
+    return Boolean(selectResidentIntent(cognitionState.current, {
+      residentId, playerIntent: 'greet', topic: 'general', locationId, tick: now,
+    }, now >>> 0));
+  }) : undefined;
+  if (!nearest) {
+    sendPttAck({ version: 1, type: 'ptt.ack', phase: 'begin', turnId: command.turnId, status: 'no_resident' });
+    return;
+  }
+  const locationId = currentRoutineStop(nearest.residentId);
+  const resident = freshPttBeginContext(nearest.residentId, locationId);
+  if (!resident) {
+    sendPttAck({ version: 1, type: 'ptt.ack', phase: 'begin', turnId: command.turnId, status: 'no_resident' });
+    return;
+  }
+  const beginAck: VillagePttAck = { version: 1, type: 'ptt.ack', phase: 'begin', turnId: command.turnId, status: 'ready', resident };
+  activePttTurns.set(command.turnId, {
+    residentId: resident.id,
+    startedAt: command.at,
+    expiresAt: Math.min(command.at + PTT_TURN_TTL_MS, Date.now() + PTT_TURN_TTL_MS),
+    beginAck,
+  });
+  sendPttAck(beginAck);
+}
+
+function applyResidentAction(intent: SelectedResidentIntent, explorer: { x: number; y: number; z: number }): void {
+  const bot = bots.get(intent.residentId);
+  if (!bot) return;
+  if (intent.action.kind === 'idle') {
+    bot.pathfinder.setGoal(null);
+    return;
+  }
+  if (intent.action.kind === 'look_at_player') {
+    bot.pathfinder.setGoal(null);
+    void bot.lookAt({ x: explorer.x, y: explorer.y + 1.5, z: explorer.z }, true).catch(() => undefined);
+  }
+}
+
+function emitResidentResponse(turnId: string, intent: SelectedResidentIntent, line: string): string | null {
+  const profile = villageProfiles.find(({ id }) => id === intent.residentId);
+  const bot = bots.get(intent.residentId);
+  if (!profile || !bot?.entity) return null;
+  const eventId = `ptt-${turnId}`;
+  const position = bot.entity.position.floored();
+  const event = createVillageDialogueEvent({
+    eventId,
+    lineId: intent.speech.lineId,
+    source: 'ptt-response',
+    turnId,
+    speakerId: profile.id,
+    speakerName: profile.username,
+    line,
+    position: { x: position.x, y: position.y, z: position.z },
+  });
+  // PTT dialogue stays out of Minecraft chat/server logs; only the transient viewer event carries it.
+  process.stdout.write(`${JSON.stringify(event)}\n`);
+  return eventId;
+}
+
+function completePttTurn(command: Extract<VillagePttCommand, { type: 'ptt.complete' }>): void {
+  prunePttTurns();
+  const active = activePttTurns.get(command.turnId);
+  if (!active) {
+    const resolved = resolvedPttTurns.get(command.turnId);
+    const status = resolved === 'expired' ? 'expired' : resolved === 'completed' ? 'duplicate' : 'no_session';
+    sendPttAck({ version: 1, type: 'ptt.ack', phase: 'complete', turnId: command.turnId, status });
+    return;
+  }
+  activePttTurns.delete(command.turnId);
+  if (Date.now() > active.expiresAt) {
+    resolvedPttTurns.set(command.turnId, 'cancelled');
+    sendPttAck({ version: 1, type: 'ptt.ack', phase: 'complete', turnId: command.turnId, status: 'expired' });
+    return;
+  }
+  const explorer = currentExplorerPosition();
+  const targetBot = bots.get(active.residentId);
+  const targetDistance = explorer && targetBot?.entity ? distance3d(targetBot.entity.position, explorer) : Number.POSITIVE_INFINITY;
+  if (!explorer || !targetBot?.entity || targetDistance > PLAYER_RESPONSE_RADIUS) {
+    resolvedPttTurns.set(command.turnId, 'cancelled');
+    sendPttAck({ version: 1, type: 'ptt.ack', phase: 'complete', turnId: command.turnId, status: 'expired' });
+    return;
+  }
+
+  const profile = villageProfiles.find(({ id }) => id === active.residentId);
+  if (!profile) {
+    resolvedPttTurns.set(command.turnId, 'cancelled');
+    sendPttAck({ version: 1, type: 'ptt.ack', phase: 'complete', turnId: command.turnId, status: 'no_session' });
+    return;
+  }
+  const initialContext = getResidentKnowledgeContext(cognitionState.current, active.residentId);
+  const semanticResponse = asSemanticResponse(command.response);
+  const validatedResponse = semanticResponse
+    ? validateSemanticResponse(semanticResponse, { residentId: active.residentId, context: initialContext })
+    : null;
+  const fallback = validatedResponse === null;
+  const playerIntent = validatedResponse?.playerIntent ?? 'unknown';
+  const topic = validatedResponse?.topic ?? 'general';
+  const now = Date.now();
+  const nearbyResidentIds = residentDistances(explorer)
+    .filter(({ distance }) => distance <= RESIDENT_HEARING_RADIUS)
+    .map(({ residentId }) => residentId);
+  const playerObservation: VillageObservation = {
+    type: 'player.intent',
+    eventId: command.turnId,
+    tick: now,
+    recipientIds: nearbyResidentIds,
+    intent: playerIntent,
+    topic,
+  };
+  cognitionState.current = reduceVillageObservation(cognitionState.current, playerObservation);
+  // A nearby held conversation is a low-stakes relationship signal; only a validated greeting counts as respectful.
+  if (validatedResponse?.playerIntent === 'greet') {
+    cognitionState.current = reduceVillageObservation(cognitionState.current, {
+      type: 'player.behavior',
+      eventId: `${command.turnId}:greet`,
+      tick: now,
+      recipientIds: [active.residentId],
+      behavior: 'respectful_exchange',
+    });
+  }
+
+  let intentContext: ResidentIntentContext = {
+    residentId: active.residentId,
+    playerIntent: validatedResponse?.playerIntent ?? 'greet',
+    topic: validatedResponse?.topic ?? 'general',
+    locationId: currentRoutineStop(active.residentId),
+    tick: now,
+  };
+  let intent = selectResidentIntent(cognitionState.current, intentContext, now >>> 0, validatedResponse ?? undefined);
+  if (!intent && (intentContext.playerIntent !== 'greet' || intentContext.topic !== 'general')) {
+    intentContext = { ...intentContext, playerIntent: 'greet', topic: 'general' };
+    intent = selectResidentIntent(cognitionState.current, intentContext, now >>> 0);
+  }
+  if (!intent || !validateResidentIntent(cognitionState.current, intent, intentContext)) {
+    resolvedPttTurns.set(command.turnId, 'completed');
+    sendPttAck({ version: 1, type: 'ptt.ack', phase: 'complete', turnId: command.turnId, status: 'rejected' });
+    return;
+  }
+  const line = intent.speech.kind === 'authored_line' ? authoredLine(intent.speech.lineId) : null;
+  if (!line) {
+    resolvedPttTurns.set(command.turnId, 'completed');
+    sendPttAck({ version: 1, type: 'ptt.ack', phase: 'complete', turnId: command.turnId, status: 'rejected' });
+    return;
+  }
+
+  applyResidentAction(intent, explorer);
+  const eventId = emitResidentResponse(command.turnId, intent, line);
+  if (!eventId) {
+    resolvedPttTurns.set(command.turnId, 'completed');
+    sendPttAck({ version: 1, type: 'ptt.ack', phase: 'complete', turnId: command.turnId, status: 'rejected' });
+    return;
+  }
+  cognitionState.current = reduceVillageObservation(cognitionState.current, {
+    type: 'beat.completed',
+    eventId: `${command.turnId}:beat`,
+    tick: now,
+    residentId: intent.residentId,
+    beatId: intent.beatId,
+  });
+  resolvedPttTurns.set(command.turnId, 'completed');
+  const status = fallback ? 'fallback' : 'accepted';
+  sendPttAck({ version: 1, type: 'ptt.ack', phase: 'complete', turnId: command.turnId, status,
+    residentId: profile.id, speakerName: profile.username, lineId: intent.speech.lineId, eventId });
+}
+
+function cancelPttTurn(command: Extract<VillagePttCommand, { type: 'ptt.cancel' }>): void {
+  const resolved = resolvedPttTurns.get(command.turnId);
+  if (resolved === 'expired') {
+    sendPttAck({ version: 1, type: 'ptt.ack', phase: 'cancel', turnId: command.turnId, status: 'expired' });
+    return;
+  }
+  if (resolved) {
+    sendPttAck({ version: 1, type: 'ptt.ack', phase: 'cancel', turnId: command.turnId, status: 'duplicate' });
+    return;
+  }
+  const active = activePttTurns.get(command.turnId);
+  if (!active) {
+    sendPttAck({ version: 1, type: 'ptt.ack', phase: 'cancel', turnId: command.turnId, status: 'no_session' });
+    return;
+  }
+  activePttTurns.delete(command.turnId);
+  resolvedPttTurns.set(command.turnId, 'cancelled');
+  sendPttAck({ version: 1, type: 'ptt.ack', phase: 'cancel', turnId: command.turnId, status: 'cancelled' });
+}
+
+function handlePttCommand(command: VillagePttCommand): void {
+  if (command.type === 'ptt.begin') beginPttTurn(command);
+  else if (command.type === 'ptt.complete') completePttTurn(command);
+  else cancelPttTurn(command);
+}
+
 function stop(): void {
   if (stopping) return;
   stopping = true;
+  activePttTurns.clear();
   for (const timer of awarenessTimers) clearInterval(timer);
   for (const bot of bots.values()) {
     bot.pathfinder.setGoal(null);
@@ -62,6 +375,23 @@ function stop(): void {
 
 process.once('SIGINT', stop);
 process.once('SIGTERM', stop);
+
+const pttInput = createInterface({ input: process.stdin, crlfDelay: Infinity });
+pttInput.on('line', (line) => {
+  if (Buffer.byteLength(line, 'utf8') > MAX_PTT_COMMAND_BYTES) return;
+  let command: unknown;
+  try { command = JSON.parse(line); } catch { return; }
+  if (!isVillagePttCommand(command)) return;
+  try {
+    handlePttCommand(command);
+  } catch {
+    const phase = command.type === 'ptt.begin' ? 'begin' : command.type === 'ptt.cancel' ? 'cancel' : 'complete';
+    if (phase === 'begin') sendPttAck({ version: 1, type: 'ptt.ack', phase, turnId: command.turnId, status: 'unavailable' });
+    else if (phase === 'cancel') sendPttAck({ version: 1, type: 'ptt.ack', phase, turnId: command.turnId, status: 'unavailable' });
+    else sendPttAck({ version: 1, type: 'ptt.ack', phase, turnId: command.turnId, status: 'unavailable' });
+  }
+});
+pttInput.on('error', () => undefined);
 
 for (const profile of villageProfiles) {
   const bot = bots.get(profile.id);
@@ -191,11 +521,32 @@ async function runVillageDialogue(): Promise<void> {
     const plannedOption = options.find(({ id }) => id === selectedId);
     const line = plannedOption?.line ?? turn.line;
     const position = bot.entity.position.floored();
+    const eventId = `village-utterance-${++dialogueSequence}`;
+    const clueId = isMystery ? (turn as typeof villageMysteryDialogue[number]).clueId : undefined;
+    const clue = clueId ? VILLAGE_FACTS[clueId as keyof typeof VILLAGE_FACTS] : undefined;
+    const topic = clue?.topic ?? 'general';
+    const heardBy = residentIdsNearPoint({ x: position.x, y: position.y, z: position.z }, RESIDENT_HEARING_RADIUS)
+      .filter((residentId) => residentId !== profile.id);
+    if (heardBy.length > 0) {
+      const observation: VillageObservation = {
+        type: 'resident.utterance',
+        eventId,
+        tick: Date.now(),
+        recipientIds: heardBy,
+        speakerId: profile.id,
+        topic,
+        ...(clueId ? { claimedFactId: clueId } : {}),
+      };
+      cognitionState.current = reduceVillageObservation(cognitionState.current, observation);
+    }
     bot.chat(line);
-    const event = createVillageDialogueEvent({ speakerId: profile.id, speakerName: profile.username, line,
+    const playerPosition = currentExplorerPosition();
+    const lineId = clueId ? `mystery-${clueId}` : plannedOption?.id ?? fallbackId;
+    const event = createVillageDialogueEvent({ eventId, lineId, source: 'ambient', speakerId: profile.id, speakerName: profile.username, line,
       position: { x: position.x, y: position.y, z: position.z }, listenerId: listener.id, listenerName: listener.username });
-    // Preserve the existing JSONL viewer event contract.
-    process.stdout.write(`${JSON.stringify(event)}\n`);
+    if (playerPosition && distance3d(playerPosition, position) <= RESIDENT_HEARING_RADIUS) {
+      process.stdout.write(`${JSON.stringify(event)}\n`);
+    }
     await watchExplorer(bot);
     await wait(8_000);
   }

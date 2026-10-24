@@ -1,8 +1,8 @@
 import { villageProfiles } from './village-profiles.ts';
+import { PLAYER_INTENTS, VILLAGE_TOPICS } from './village-vocabulary.js';
 
-export const PLAYER_INTENTS = ['greet', 'ask_about_known_topic', 'ask_for_help', 'leave', 'unknown'] as const;
+export { PLAYER_INTENTS, VILLAGE_TOPICS };
 export type PlayerIntent = typeof PLAYER_INTENTS[number];
-export const VILLAGE_TOPICS = ['general', 'bell', 'flour', 'route', 'garden', 'bakery'] as const;
 export type VillageTopic = typeof VILLAGE_TOPICS[number];
 export type ResidentAction =
   | { kind: 'idle' }
