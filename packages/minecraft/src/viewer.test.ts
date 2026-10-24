@@ -4,8 +4,63 @@ import { createServer, type IncomingMessage, type Server } from 'node:http';
 import type { Duplex } from 'node:stream';
 import test from 'node:test';
 import { startLoopbackViewer } from './viewer.ts';
+import { isVillageDialogue, volumeForDistance } from './viewer-audio.js';
 
 const require = createRequire(import.meta.url);
+
+test('maps greater explorer distance to lower speech volume and validates dialogue events', () => {
+  assert.ok(volumeForDistance(2) > volumeForDistance(12));
+  assert.ok(volumeForDistance(12) > volumeForDistance(40));
+  assert.ok(volumeForDistance(100) > volumeForDistance(200));
+  assert.equal(isVillageDialogue({
+    type: 'village.dialogue', speakerId: 'a', speakerName: 'A', line: 'hello',
+    position: { x: 1, y: 2, z: 3 }, timestamp: 10,
+  }), true);
+  assert.equal(isVillageDialogue({ type: 'village.dialogue', line: 'bad' }), false);
+});
+
+test('serves subtitles client and relays validated dialogue over same-origin SSE', async () => {
+  const probe = createServer();
+  probe.listen(0);
+  await new Promise<void>((resolve) => probe.once('listening', resolve));
+  const address = probe.address();
+  assert.ok(address && typeof address !== 'string');
+  const port = address.port;
+  await new Promise<void>((resolve, reject) => probe.close((error) => error ? reject(error) : resolve()));
+  let server: Server | undefined;
+  let activeReader: ReadableStreamDefaultReader<Uint8Array> | undefined;
+  const stop = await startLoopbackViewer({}, port, (_bot, options) => {
+    server = createServer((_request, response) => response.end('viewer'));
+    server.listen(options.port, () => undefined);
+  });
+  try {
+    const page = await fetch(`http://127.0.0.1:${port}/`, { headers: { origin: `http://127.0.0.1:${port}` } });
+    assert.match(await page.text(), /boson-audio\.js/);
+    const stream = await fetch(`http://127.0.0.1:${port}/boson-dialogue`, { headers: { origin: `http://127.0.0.1:${port}` } });
+    assert.equal(stream.status, 200);
+    activeReader = stream.body?.getReader();
+    assert.ok(activeReader);
+    await activeReader.read();
+    const event = { type: 'village.dialogue', speakerId: 'mira', speakerName: 'Mira', line: 'Good morning.', position: { x: 0, y: 64, z: 0 }, timestamp: 123 };
+    const response = await fetch(`http://127.0.0.1:${port}/boson-dialogue`, {
+      method: 'POST', headers: { origin: `http://127.0.0.1:${port}`, 'content-type': 'application/json' }, body: JSON.stringify(event),
+    });
+    assert.equal(response.status, 202);
+    const message = await activeReader.read();
+    assert.match(new TextDecoder().decode(message.value), /event: dialogue[\s\S]*Mira/);
+    const invalid = await fetch(`http://127.0.0.1:${port}/boson-dialogue`, {
+      method: 'POST', headers: { origin: `http://127.0.0.1:${port}`, 'content-type': 'application/json' }, body: '{}',
+    });
+    assert.equal(invalid.status, 400);
+    const rejected = await fetch(`http://127.0.0.1:${port}/boson-dialogue`, {
+      method: 'POST', headers: { origin: 'https://attacker.example', 'content-type': 'application/json' }, body: JSON.stringify(event),
+    });
+    assert.equal(rejected.status, 403);
+  } finally {
+    await stop();
+    if (activeReader) assert.equal((await activeReader.read()).done, true);
+  }
+});
 
 test('binds the Prismarine HTTP viewer to loopback only', async () => {
   const probe = createServer();
@@ -32,22 +87,28 @@ test('binds the Prismarine HTTP viewer to loopback only', async () => {
   assert.ok(bound && typeof bound !== 'string');
   assert.equal(bound.address, '127.0.0.1');
 
-  const page = await fetch(`http://127.0.0.1:${port}/`, { headers: { origin: 'http://127.0.0.1:8000' } });
-  assert.equal(page.status, 200);
-  assert.equal(page.headers.get('content-security-policy'), 'frame-ancestors http://127.0.0.1:8000 http://localhost:8000');
-  const rejected = await fetch(`http://127.0.0.1:${port}/`, { headers: { origin: 'https://attacker.example' } });
-  assert.equal(rejected.status, 403);
-  assert.equal(requests, 1);
+  try {
+    const page = await fetch(`http://127.0.0.1:${port}/`, { headers: { origin: 'http://127.0.0.1:8000' } });
+    assert.equal(page.status, 200);
+    assert.equal(page.headers.get('content-security-policy'), 'frame-ancestors http://127.0.0.1:8000 http://localhost:8000');
+    assert.match(await page.text(), /boson-audio\.js/);
+    const rejected = await fetch(`http://127.0.0.1:${port}/`, { headers: { origin: 'https://attacker.example' } });
+    assert.equal(rejected.status, 403);
+    const fallback = await fetch(`http://127.0.0.1:${port}/fallback`, { headers: { origin: 'http://127.0.0.1:8000' } });
+    assert.equal(fallback.status, 200);
+    assert.equal(requests, 1);
 
-  let upgraded = false;
-  const handshake = {
-    headers: { host: `127.0.0.1:${port}`, origin: 'https://attacker.example' },
-    url: '/socket.io/?EIO=4&transport=websocket',
-  } as IncomingMessage;
-  const socket = { end: () => { upgraded = true; } } as unknown as Duplex;
-  server.emit('upgrade', handshake, socket, Buffer.alloc(0));
-  assert.equal(upgraded, true);
-  await stop();
+    let upgraded = false;
+    const handshake = {
+      headers: { host: `127.0.0.1:${port}`, origin: 'https://attacker.example' },
+      url: '/socket.io/?EIO=4&transport=websocket',
+    } as IncomingMessage;
+    const socket = { end: () => { upgraded = true; } } as unknown as Duplex;
+    server.emit('upgrade', handshake, socket, Buffer.alloc(0));
+    assert.equal(upgraded, true);
+  } finally {
+    await stop();
+  }
 });
 
 test('rejects an occupied viewer port without an unhandled server error', async () => {

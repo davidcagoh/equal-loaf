@@ -1,6 +1,8 @@
 import { createRequire } from 'node:module';
 import { once } from 'node:events';
 import { Server, type IncomingMessage, type ServerResponse } from 'node:http';
+import { readFileSync } from 'node:fs';
+import { isVillageDialogue } from './viewer-audio.js';
 import type { Duplex } from 'node:stream';
 import type { MineflayerBot } from './index.ts';
 
@@ -10,12 +12,52 @@ type ViewerBot = MineflayerBot & { viewer?: { close?: () => void } };
 
 const require = createRequire(import.meta.url);
 
-function restrictViewerRequests(server: Server, port: number): void {
+function restrictViewerRequests(server: Server, port: number): () => void {
   const viewerOrigins = new Set([`http://127.0.0.1:${port}`, `http://localhost:${port}`]);
   const documentOrigins = new Set([...viewerOrigins, 'http://127.0.0.1:8000', 'http://localhost:8000']);
   const allowedHosts = new Set([`127.0.0.1:${port}`, `localhost:${port}`]);
   const framePolicy = "frame-ancestors http://127.0.0.1:8000 http://localhost:8000";
   const originalEmit = server.emit;
+  const dialogueClients = new Set<ServerResponse>();
+  const viewerIndex = readFileSync(require.resolve('prismarine-viewer/public/index.html'), 'utf8');
+  const viewerPage = viewerIndex.replace('</body>', '<script src="/socket.io/socket.io.js"></script><script type="module" src="/boson-audio.js"></script></body>');
+
+  const routeDialogue = (request: IncomingMessage, response: ServerResponse): boolean => {
+    if (request.url?.split('?')[0] !== '/boson-dialogue') return false;
+    if (request.method === 'GET') {
+      response.writeHead(200, { 'Content-Type': 'text/event-stream', 'Cache-Control': 'no-cache', Connection: 'keep-alive' });
+      response.write(': connected\n\n');
+      dialogueClients.add(response);
+      response.once('close', () => dialogueClients.delete(response));
+      return true;
+    }
+    if (request.method !== 'POST') {
+      response.writeHead(405, { Allow: 'GET, POST' }).end();
+      return true;
+    }
+    const chunks: Buffer[] = [];
+    let size = 0;
+    request.on('data', (chunk: Buffer) => {
+      size += chunk.length;
+      if (size > 4096) request.destroy();
+      else chunks.push(chunk);
+    });
+    request.on('end', () => {
+      try {
+        const event: unknown = JSON.parse(Buffer.concat(chunks).toString('utf8'));
+        if (!isVillageDialogue(event)) {
+          response.writeHead(400).end('Invalid village dialogue event.');
+          return;
+        }
+        const data = `event: dialogue\ndata: ${JSON.stringify(event)}\n\n`;
+        for (const client of dialogueClients) client.write(data);
+        response.writeHead(202).end();
+      } catch {
+        response.writeHead(400).end('Invalid JSON dialogue event.');
+      }
+    });
+    return true;
+  };
 
   const allowed = (request: IncomingMessage, socketHandshake = false): boolean => {
     const host = request.headers.host;
@@ -35,6 +77,16 @@ function restrictViewerRequests(server: Server, port: number): void {
         response.writeHead(403).end('Local viewer requests only.');
         return true;
       }
+      if (routeDialogue(request, response)) return true;
+      if (request.method === 'GET' && (request.url === '/' || request.url === '/index.html')) {
+        response.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8' }).end(viewerPage);
+        return true;
+      }
+      if (request.method === 'GET' && request.url === '/boson-audio.js') {
+        response.writeHead(200, { 'Content-Type': 'text/javascript; charset=utf-8', 'Cache-Control': 'no-cache' })
+          .end(readFileSync(new URL('./viewer-audio.js', import.meta.url)));
+        return true;
+      }
     }
     if (eventName === 'upgrade') {
       const [request, socket] = args as [IncomingMessage, Duplex];
@@ -45,6 +97,11 @@ function restrictViewerRequests(server: Server, port: number): void {
     }
     return Reflect.apply(originalEmit, this, [eventName, ...args]);
   } as typeof server.emit;
+
+  return () => {
+    for (const client of dialogueClients) client.end();
+    dialogueClients.clear();
+  };
 }
 
 export async function startLoopbackViewer(bot: object, port: number, start: ViewerStarter): Promise<() => Promise<void>> {
@@ -78,7 +135,7 @@ export async function startLoopbackViewer(bot: object, port: number, start: View
 
   if (!viewerServer) throw new Error('Prismarine viewer did not start an HTTP listener');
   const server = viewerServer;
-  restrictViewerRequests(server, port);
+  const closeDialogueClients = restrictViewerRequests(server, port);
   try {
     await new Promise<void>((resolve, reject) => {
       const onListening = () => {
@@ -100,6 +157,7 @@ export async function startLoopbackViewer(bot: object, port: number, start: View
   return async () => {
     if (stopped) return;
     stopped = true;
+    closeDialogueClients();
     const viewerClose = (bot as ViewerBot).viewer?.close;
     if (server.listening && viewerClose) {
       const closed = once(server, 'close');
